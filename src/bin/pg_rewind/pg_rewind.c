@@ -672,7 +672,12 @@ perform_rewind(filemap_t *filemap, rewind_source *source,
 	ControlFile_new.minRecoveryPointTLI = endtli;
 	ControlFile_new.state = DB_IN_ARCHIVE_RECOVERY;
 	if (!dry_run)
+	{
 		update_controlfile(datadir_target, &ControlFile_new, do_sync);
+
+		/* Put information into operation log. */
+		put_operation_log_element(datadir_target, OLT_REWIND);
+	}
 }
 
 static void

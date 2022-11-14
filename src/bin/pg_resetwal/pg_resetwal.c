@@ -885,6 +885,9 @@ RewriteControlFile(void)
 
 	/* The control file gets flushed here. */
 	update_controlfile(".", &ControlFile, true);
+
+	/* Put information into operation log. */
+	put_operation_log_element(".", OLT_RESETWAL);
 }
 
 
