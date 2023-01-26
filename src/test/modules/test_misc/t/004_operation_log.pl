@@ -23,7 +23,7 @@ $node_primary->start;
 
 # Get server version
 my $server_version = $node_primary->safe_psql("postgres", "SELECT current_setting('server_version_num');") + 0;
-my $major_version = $server_version / 10000;
+my $major_version = int($server_version / 10000);
 my $minor_version = $server_version % 100;
 
 # Get primary node backup
