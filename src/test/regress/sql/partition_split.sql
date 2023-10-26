@@ -830,4 +830,156 @@ SELECT * FROM sales_others;
 DROP TABLE sales_range;
 
 --
+--
+-- Tests for SPLIT optimization (BY RANGE partitioning): if one of the new
+-- partitions contains all the rows of the split partition, then we can rename
+-- the split partition instead of creating a new partition and moving the rows.
+--
+-- 1. Optimization should be used.
+--
+CREATE TABLE test(name text, i int) PARTITION BY RANGE (i);
+CREATE TABLE test_1 PARTITION OF test FOR VALUES FROM (1) TO (10);
+CREATE TABLE test_def PARTITION OF test DEFAULT;
+CREATE INDEX idx_test_i ON test(i);
+INSERT INTO test(name, i) VALUES
+  ('a1', 1), ('a5', 5), ('a15', 15), ('a12', 12), ('a17', 17), ('a11', 11);
+-- should be rows 15, 12, 17, 11:
+SELECT i FROM test_def;
+SELECT 'test_def'::regclass::oid AS prev_oid \gset
+ALTER TABLE test SPLIT PARTITION test_def INTO 
+  (PARTITION test_def DEFAULT, PARTITION test_2 FOR VALUES FROM (11) TO (19));
+-- should be 't' (table "test_2" after SPLIT should be the same as table
+-- "test_def" before SPLIT):
+SELECT 'test_2'::regclass::oid=:prev_oid;
+-- should be rows 15, 12, 17, 11:
+SELECT i FROM test_2;
+-- should be 0 rows:
+SELECT i FROM test_def;
+-- should be 6 rows:
+SELECT * FROM test;
+DROP TABLE test CASCADE;
+--
+-- 2. Optimization cannot be used because not exists btree-index on the
+-- partition key (it is used to check the placement of rows in the partitions).
+--
+CREATE TABLE test(name text, i int) PARTITION BY RANGE (i);
+CREATE TABLE test_1 PARTITION OF test FOR VALUES FROM (1) TO (10);
+CREATE TABLE test_def PARTITION OF test DEFAULT;
+INSERT INTO test(name, i) VALUES
+  ('a1', 1), ('a5', 5), ('a15', 15), ('a12', 12), ('a17', 17), ('a11', 11);
+SELECT 'test_def'::regclass::oid AS prev_oid \gset
+ALTER TABLE test SPLIT PARTITION test_def INTO 
+  (PARTITION test_def DEFAULT, PARTITION test_2 FOR VALUES FROM (11) TO (19));
+-- should be 'f' (tables "test_2" and "test_def" should be different):
+SELECT 'test_2'::regclass::oid=:prev_oid;
+-- should be rows 15, 12, 17, 11:
+SELECT i FROM test_2;
+-- should be 6 rows:
+SELECT * FROM test;
+DROP TABLE test CASCADE;
+--
+-- 3. Optimization cannot be used because rows should be moved into different
+-- partitions.
+--
+CREATE TABLE test(name text, i int) PARTITION BY RANGE (i);
+CREATE TABLE test_1 PARTITION OF test FOR VALUES FROM (1) TO (10);
+CREATE TABLE test_def PARTITION OF test DEFAULT;
+CREATE INDEX idx_test_i ON test(i);
+INSERT INTO test(name, i) VALUES
+  ('a1', 1), ('a5', 5), ('a15', 15), ('a12', 12), ('a27', 27), ('a11', 11);
+SELECT 'test_def'::regclass::oid AS prev_oid \gset
+ALTER TABLE test SPLIT PARTITION test_def INTO 
+  (PARTITION test_def DEFAULT, PARTITION test_2 FOR VALUES FROM (11) TO (19));
+-- should be 'f' (tables "test_2" and "test_def" should be different):
+SELECT 'test_2'::regclass::oid=:prev_oid;
+-- should be rows 15, 12, 11:
+SELECT i FROM test_2;
+-- should be 6 rows:
+SELECT * FROM test;
+DROP TABLE test CASCADE;
+--
+-- 4. Optimization should be used, DEFAUT partition renames to DEFAULT
+-- partition.
+--
+CREATE TABLE test(name text, i int) PARTITION BY RANGE (i);
+CREATE TABLE test_1 PARTITION OF test FOR VALUES FROM (1) TO (10);
+CREATE TABLE test_def PARTITION OF test DEFAULT;
+CREATE INDEX idx_test_i ON test(i);
+INSERT INTO test(name, i) VALUES
+  ('a1', 1), ('a5', 5), ('a25', 25), ('a22', 22), ('a27', 27), ('a21', 21);
+-- should be rows 25, 22, 27, 21:
+SELECT i FROM test_def;
+SELECT 'test_def'::regclass::oid AS prev_oid \gset
+ALTER TABLE test SPLIT PARTITION test_def INTO 
+  (PARTITION test_def DEFAULT, PARTITION test_2 FOR VALUES FROM (11) TO (19));
+-- should be 't' (table "test_def" after SPLIT should be the same as table
+-- "test_def" before SPLIT):
+SELECT 'test_def'::regclass::oid=:prev_oid;
+-- should be 0 rows:
+SELECT i FROM test_2;
+-- should be rows 25, 22, 27, 21:
+SELECT i FROM test_def;
+-- should be 6 rows:
+SELECT * FROM test;
+DROP TABLE test CASCADE;
+--
+-- 5. Optimization should be used, 2-column partition key + different columns
+-- order in partitions.
+--
+CREATE TABLE test_2colkey(s smallint, b bigint, t text) PARTITION BY RANGE (b, s);
+CREATE TABLE test_2colkey_1 PARTITION OF test_2colkey FOR VALUES FROM (1000000001, 1) TO (1000000100, 100);
+CREATE TABLE test_2colkey_def(i int, b bigint, s smallint, t text);
+ALTER TABLE test_2colkey_def DROP COLUMN i;
+ALTER TABLE test_2colkey ATTACH PARTITION test_2colkey_def DEFAULT;
+CREATE INDEX idx_test_2colkey_s_b ON test_2colkey(b, s);
+
+INSERT INTO test_2colkey (b, s, t) VALUES (1000000010, 3, 'value_10_3');
+INSERT INTO test_2colkey (b, s, t) VALUES (1000000120, 4, 'value_120_4');
+INSERT INTO test_2colkey (b, s, t) VALUES (1000000003, 5, 'value_3_5');
+INSERT INTO test_2colkey (b, s, t) VALUES (1000000124, 2, 'value_124_2');
+
+-- should be 4 rows:
+SELECT b, s FROM test_2colkey;
+-- should be 2 rows:
+SELECT b, s FROM test_2colkey_def;
+
+SELECT 'test_2colkey_def'::regclass::oid AS prev_oid \gset
+
+ALTER TABLE test_2colkey SPLIT PARTITION test_2colkey_def INTO
+  (PARTITION test_2colkey_2 FOR VALUES FROM (1000000101, 1) TO (1000000200, 100),
+   PARTITION test_2colkey_def DEFAULT);
+
+-- should be 't' (table "test_2colkey_2" after SPLIT should be the same as table
+-- "test_2colkey_def" before SPLIT):
+SELECT 'test_2colkey_2'::regclass::oid=:prev_oid;
+
+-- should be 2 rows:
+SELECT b, s FROM test_2colkey_2;
+-- should be 0 rows:
+SELECT b, s FROM test_2colkey_def;
+-- should be 6 rows:
+SELECT b, s FROM test_2colkey;
+
+--
+-- 5.1. Optimization cannot be used.
+--
+INSERT INTO test_2colkey (b, s, t) VALUES (1000000200, 1, 'value_200_1');
+
+SELECT 'test_2colkey_2'::regclass::oid AS prev_oid \gset
+
+ALTER TABLE test_2colkey SPLIT PARTITION test_2colkey_2 INTO
+  (PARTITION test_2colkey_2 FOR VALUES FROM (1000000101, 1) TO (1000000150, 100),
+   PARTITION test_2colkey_3 FOR VALUES FROM (1000000151, 1) TO (1000000200, 100));
+
+-- should be 'f' (optimization is not used):
+SELECT 'test_2colkey_2'::regclass::oid=:prev_oid;
+
+-- should be 2 rows:
+SELECT b, s FROM test_2colkey_2;
+-- should be 1 row:
+SELECT b, s FROM test_2colkey_3;
+
+DROP TABLE test_2colkey CASCADE;
+
+--
 DROP SCHEMA partition_split_schema;
