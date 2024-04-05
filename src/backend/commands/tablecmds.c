@@ -21431,7 +21431,6 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	ListCell   *listptr;
 	List	   *mergingPartitionsList = NIL;
 	Oid			defaultPartOid;
-	char		tmpRelName[NAMEDATALEN];
 	RangeVar   *mergePartName = cmd->name;
 	bool		isSameName = false;
 
@@ -21461,12 +21460,17 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		 * function transformPartitionCmdForMerge().
 		 */
 		if (equal(name, cmd->name))
+		{
 			/* One new partition can have the same name as merged partition. */
 			isSameName = true;
-
-		/* Store a next merging partition into the list. */
-		mergingPartitionsList = lappend(mergingPartitionsList,
-										mergingPartition);
+			newPartRel = mergingPartition;
+		}
+		else
+		{
+			/* Store a next merging partition into the list. */
+			mergingPartitionsList = lappend(mergingPartitionsList,
+											mergingPartition);
+		}
 	}
 
 	/* Detach all merged partitions. */
@@ -21482,26 +21486,34 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		DetachPartitionFinalize(rel, mergingPartition, false, defaultPartOid);
 	}
 
-	/* Create table for new partition, use partitioned table as model. */
 	if (isSameName)
 	{
-		/* Create partition table with generated temparary name. */
-		sprintf(tmpRelName, "merge-%u-%X-tmp", RelationGetRelid(rel), MyProcPid);
-		mergePartName = makeRangeVar(get_namespace_name(RelationGetNamespace(rel)),
-									 tmpRelName, -1);
-	}
-	createPartitionTable(mergePartName,
-						 makeRangeVar(get_namespace_name(RelationGetNamespace(rel)),
-									  RelationGetRelationName(rel), -1),
-						 context);
+		/* Detach partition that we re-use for merged partition. */
 
-	/*
-	 * Open the new partition and acquire exclusive lock on it.  This will
-	 * stop all the operations with partitioned table.  This might seem
-	 * excessive, but this is the way we make sure nobody is planning queries
-	 * involving merging partitions.
-	 */
-	newPartRel = table_openrv(mergePartName, AccessExclusiveLock);
+		/* Remove the pg_inherits row first. */
+		RemoveInheritance(newPartRel, rel, false);
+		/* Do the final part of detaching. */
+		DetachPartitionFinalize(rel, newPartRel, false, defaultPartOid);
+
+		/* Make these updates visible */
+		CommandCounterIncrement();
+	}
+	else
+	{
+		/* Create table for new partition, use partitioned table as model. */
+		createPartitionTable(mergePartName,
+							 makeRangeVar(get_namespace_name(RelationGetNamespace(rel)),
+										  RelationGetRelationName(rel), -1),
+							 context);
+
+		/*
+		 * Open the new partition and acquire exclusive lock on it.  This will
+		 * stop all the operations with partitioned table.  This might seem
+		 * excessive, but this is the way we make sure nobody is planning
+		 * queries involving merging partitions.
+		 */
+		newPartRel = table_openrv(mergePartName, AccessExclusiveLock);
+	}
 
 	/* Copy data from merged partitions to new partition. */
 	moveMergedTablesRows(rel, mergingPartitionsList, newPartRel);
@@ -21529,19 +21541,6 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		performDeletion(&object, DROP_RESTRICT, 0);
 	}
 	list_free(mergingPartitionsList);
-
-	/* Rename new partition if it is needed. */
-	if (isSameName)
-	{
-		/*
-		 * We must bump the command counter to make the new partition tuple
-		 * visible for rename.
-		 */
-		CommandCounterIncrement();
-		/* Rename partition. */
-		RenameRelationInternal(RelationGetRelid(newPartRel),
-							   cmd->name->relname, false, false);
-	}
 	/* Keep the lock until commit. */
 	table_close(newPartRel, NoLock);
 }

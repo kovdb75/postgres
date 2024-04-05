@@ -211,13 +211,13 @@ ALTER TABLE sales_range MERGE PARTITIONS (sales_jan2022, sales_mar2022, sales_ot
 select * from sales_others;
  salesman_id | salesman_name | sales_amount | sales_date 
 -------------+---------------+--------------+------------
+          14 | Smith         |          510 | 05-04-2022
            1 | May           |         1000 | 01-31-2022
           10 | Halder        |          350 | 01-28-2022
           13 | Gandi         |          377 | 01-09-2022
            7 | Li            |          175 | 03-08-2022
            9 | Muller        |          250 | 03-11-2022
           12 | Plato         |          350 | 03-19-2022
-          14 | Smith         |          510 | 05-04-2022
 (7 rows)
 
 -- show partitions with conditions:
