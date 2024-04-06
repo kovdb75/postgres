@@ -748,7 +748,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	ORDER ORDINALITY OTHERS OUT_P OUTER_P
 	OVER OVERLAPS OVERLAY OVERRIDING OWNED OWNER
 
-	PARALLEL PARAMETER PARSER PARTIAL PARTITION PASSING PASSWORD PATH
+	PARALLEL PARAMETER PARSER PARTIAL PARTITION PARTITIONS PASSING PASSWORD PATH
 	PERIOD PLACING PLAN PLANS POLICY
 	POSITION PRECEDING PRECISION PRESERVE PREPARE PREPARED PRIMARY
 	PRIOR PRIVILEGES PROCEDURAL PROCEDURE PROCEDURES PROGRAM PUBLICATION
@@ -2324,6 +2324,7 @@ partition_cmd:
 					n->subtype = AT_AttachPartition;
 					cmd->name = $3;
 					cmd->bound = $4;
+					cmd->partlist = NULL;
 					cmd->concurrent = false;
 					n->def = (Node *) cmd;
 
@@ -2338,6 +2339,7 @@ partition_cmd:
 					n->subtype = AT_DetachPartition;
 					cmd->name = $3;
 					cmd->bound = NULL;
+					cmd->partlist = NULL;
 					cmd->concurrent = $4;
 					n->def = (Node *) cmd;
 
@@ -2351,6 +2353,21 @@ partition_cmd:
 					n->subtype = AT_DetachPartitionFinalize;
 					cmd->name = $3;
 					cmd->bound = NULL;
+					cmd->partlist = NULL;
+					cmd->concurrent = false;
+					n->def = (Node *) cmd;
+					$$ = (Node *) n;
+				}
+			/* ALTER TABLE <name> MERGE PARTITIONS () INTO <partition_name> */
+			| MERGE PARTITIONS '(' qualified_name_list ')' INTO qualified_name
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					PartitionCmd *cmd = makeNode(PartitionCmd);
+
+					n->subtype = AT_MergePartitions;
+					cmd->name = $7;
+					cmd->bound = NULL;
+					cmd->partlist = $4;
 					cmd->concurrent = false;
 					n->def = (Node *) cmd;
 					$$ = (Node *) n;
@@ -2367,6 +2384,7 @@ index_partition_cmd:
 					n->subtype = AT_AttachPartition;
 					cmd->name = $3;
 					cmd->bound = NULL;
+					cmd->partlist = NULL;
 					cmd->concurrent = false;
 					n->def = (Node *) cmd;
 
@@ -17802,6 +17820,7 @@ unreserved_keyword:
 			| PARSER
 			| PARTIAL
 			| PARTITION
+			| PARTITIONS
 			| PASSING
 			| PASSWORD
 			| PATH
@@ -18426,6 +18445,7 @@ bare_label_keyword:
 			| PARSER
 			| PARTIAL
 			| PARTITION
+			| PARTITIONS
 			| PASSING
 			| PASSWORD
 			| PATH
