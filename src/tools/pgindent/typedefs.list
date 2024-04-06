@@ -2774,6 +2774,7 @@ SpecialJoinInfo
 SpinDelayStatus
 SplitInterval
 SplitLR
+SplitPartitionContext
 SplitPageLayout
 SplitPoint
 SplitTextOutputData
