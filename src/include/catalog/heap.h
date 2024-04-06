@@ -119,6 +119,12 @@ extern List *AddRelationNotNullConstraints(Relation rel,
 										   List *constraints,
 										   List *old_notnulls);
 
+extern Oid StoreRelCheck(Relation rel, const char *ccname, Node *expr,
+						 bool is_enforced, bool is_validated, bool is_local,
+						 int16 inhcount, bool is_no_inherit, bool is_internal);
+
+extern void SetRelationNumChecks(Relation rel, int numchecks);
+
 extern void RelationClearMissing(Relation rel);
 extern void SetAttrMissing(Oid relid, char *attname, char *value);
 
