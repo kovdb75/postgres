@@ -137,7 +137,7 @@ static void transformConstraintAttrs(CreateStmtContext *cxt,
 									 List *constraintList);
 static void transformColumnType(CreateStmtContext *cxt, ColumnDef *column);
 static void setSchemaName(const char *context_schema, char **stmt_schema_name);
-static void transformPartitionCmd(CreateStmtContext *cxt, PartitionCmd *cmd);
+static void transformPartitionCmd(CreateStmtContext *cxt, PartitionBoundSpec *bound);
 static List *transformPartitionRangeBounds(ParseState *pstate, List *blist,
 										   Relation parent);
 static void validateInfiniteBounds(ParseState *pstate, List *blist);
@@ -3517,9 +3517,11 @@ transformRuleStmt(RuleStmt *stmt, const char *queryString,
  * checkPartition
  * Check whether partRelOid is a leaf partition of the parent table (rel).
  * Partition with OID partRelOid must be locked before function call.
+ * is_merge: true indicates the operation is "ALTER TABLE ... MERGE PARTITIONS";
+ * false indicates the operation is "ALTER TABLE ... SPLIT PARTITIONS".
  */
 static void
-checkPartition(Relation rel, Oid partRelOid)
+checkPartition(Relation rel, Oid partRelOid, bool is_merge)
 {
 	Relation	partRel;
 
@@ -3529,24 +3531,70 @@ checkPartition(Relation rel, Oid partRelOid)
 		ereport(ERROR,
 				errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				errmsg("\"%s\" is not a table", RelationGetRelationName(partRel)),
-				errhint("ALTER TABLE ... MERGE PARTITIONS can only merge partitions don't have sub-partitions"));
+				is_merge
+				? errhint("ALTER TABLE ... MERGE PARTITIONS can only merge partitions don't have sub-partitions")
+				: errhint("ALTER TABLE ... SPLIT PARTITIONS can only split partitions don't have sub-partitions"));
 
 	if (!partRel->rd_rel->relispartition)
 		ereport(ERROR,
 				errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				errmsg("\"%s\" is not a partition of partitioned table \"%s\"",
 					   RelationGetRelationName(partRel), RelationGetRelationName(rel)),
-				errhint("ALTER TABLE ... MERGE PARTITIONS can only merge partitions don't have sub-partitions"));
+				is_merge
+				? errhint("ALTER TABLE ... MERGE PARTITIONS can only merge partitions don't have sub-partitions")
+				: errhint("ALTER TABLE ... SPLIT PARTITIONS can only split partitions don't have sub-partitions"));
 
 	if (get_partition_parent(partRelOid, false) != RelationGetRelid(rel))
 		ereport(ERROR,
 				errcode(ERRCODE_UNDEFINED_TABLE),
 				errmsg("relation \"%s\" is not a partition of relation \"%s\"",
 					   RelationGetRelationName(partRel), RelationGetRelationName(rel)),
-				errhint("ALTER TABLE ... MERGE PARTITIONS can only merge partitions don't have sub-partitions"));
+				is_merge
+				? errhint("ALTER TABLE ... MERGE PARTITIONS can only merge partitions don't have sub-partitions")
+				: errhint("ALTER TABLE ... SPLIT PARTITIONS can only split partitions don't have sub-partitions"));
 
 	table_close(partRel, NoLock);
 }
+
+/*
+ * transformPartitionCmdForSplit
+ *		Analyze the ALTER TABLE ... SPLIT PARTITION command
+ *
+ * For each new partition sps->bound is set to the transformed value of bound.
+ * Does checks for bounds of new partitions.
+ */
+static void
+transformPartitionCmdForSplit(CreateStmtContext *cxt, PartitionCmd *partcmd)
+{
+	Relation	parent = cxt->rel;
+	Oid			splitPartOid;
+
+	/* Transform partition bounds for all partitions in the list: */
+	foreach_node(SinglePartitionSpec, sps, partcmd->partlist)
+	{
+		cxt->partbound = NULL;
+		transformPartitionCmd(cxt, sps->bound);
+		/* Assign transformed value of the partition bound. */
+		sps->bound = cxt->partbound;
+	}
+
+	/*
+	 * Open and lock partition, check ownership along the way. We need to use
+	 * AccessExclusiveLock here, because this split partition will be detached
+	 * then dropped in ATExecSplitPartition.
+	 */
+	splitPartOid = RangeVarGetRelidExtended(partcmd->name,
+											AccessExclusiveLock,
+											false,
+											RangeVarCallbackOwnsRelation,
+											NULL);
+
+	checkPartition(parent, splitPartOid, false);
+
+	/* Then we should check partitions with transformed bounds. */
+	check_partitions_for_split(parent, splitPartOid, partcmd->partlist, cxt->pstate);
+}
+
 
 /*
  * transformPartitionCmdForMerge
@@ -3626,7 +3674,7 @@ transformPartitionCmdForMerge(CreateStmtContext *cxt, PartitionCmd *partcmd)
 						parser_errposition(cxt->pstate, name->location));
 		}
 
-		checkPartition(parent, partOid);
+		checkPartition(parent, partOid, true);
 
 		partOids = lappend_oid(partOids, partOid);
 	}
@@ -3914,7 +3962,7 @@ transformAlterTableStmt(Oid relid, AlterTableStmt *stmt,
 				{
 					PartitionCmd *partcmd = (PartitionCmd *) cmd->def;
 
-					transformPartitionCmd(&cxt, partcmd);
+					transformPartitionCmd(&cxt, partcmd->bound);
 					/* assign transformed value of the partition bound */
 					partcmd->bound = cxt.partbound;
 				}
@@ -3932,6 +3980,20 @@ transformAlterTableStmt(Oid relid, AlterTableStmt *stmt,
 								errmsg("list of partitions to be merged should include at least two partitions"));
 
 					transformPartitionCmdForMerge(&cxt, partcmd);
+					newcmds = lappend(newcmds, cmd);
+					break;
+				}
+
+			case AT_SplitPartition:
+				{
+					PartitionCmd *partcmd = (PartitionCmd *) cmd->def;
+
+					if (list_length(partcmd->partlist) < 2)
+						ereport(ERROR,
+								errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+								errmsg("list of new partitions should contain at least two partitions"));
+
+					transformPartitionCmdForSplit(&cxt, partcmd);
 					newcmds = lappend(newcmds, cmd);
 					break;
 				}
@@ -4366,13 +4428,13 @@ setSchemaName(const char *context_schema, char **stmt_schema_name)
 
 /*
  * transformPartitionCmd
- *		Analyze the ATTACH/DETACH PARTITION command
+ *		Analyze the ATTACH/DETACH/SPLIT PARTITION command
  *
- * In case of the ATTACH PARTITION command, cxt->partbound is set to the
- * transformed value of cmd->bound.
+ * In case of the ATTACH/SPLIT PARTITION command, cxt->partbound is set to the
+ * transformed value of bound.
  */
 static void
-transformPartitionCmd(CreateStmtContext *cxt, PartitionCmd *cmd)
+transformPartitionCmd(CreateStmtContext *cxt, PartitionBoundSpec *bound)
 {
 	Relation	parentRel = cxt->rel;
 
@@ -4381,9 +4443,9 @@ transformPartitionCmd(CreateStmtContext *cxt, PartitionCmd *cmd)
 		case RELKIND_PARTITIONED_TABLE:
 			/* transform the partition bound, if any */
 			Assert(RelationGetPartitionKey(parentRel) != NULL);
-			if (cmd->bound != NULL)
+			if (bound != NULL)
 				cxt->partbound = transformPartitionBound(cxt->pstate, parentRel,
-														 cmd->bound);
+														 bound);
 			break;
 		case RELKIND_PARTITIONED_INDEX:
 
@@ -4391,7 +4453,7 @@ transformPartitionCmd(CreateStmtContext *cxt, PartitionCmd *cmd)
 			 * A partitioned index cannot have a partition bound set.  ALTER
 			 * INDEX prevents that with its grammar, but not ALTER TABLE.
 			 */
-			if (cmd->bound != NULL)
+			if (bound != NULL)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 						 errmsg("\"%s\" is not a partitioned table",
