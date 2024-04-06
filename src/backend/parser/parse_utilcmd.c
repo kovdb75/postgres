@@ -137,7 +137,7 @@ static void transformConstraintAttrs(CreateStmtContext *cxt,
 									 List *constraintList);
 static void transformColumnType(CreateStmtContext *cxt, ColumnDef *column);
 static void setSchemaName(const char *context_schema, char **stmt_schema_name);
-static void transformPartitionCmd(CreateStmtContext *cxt, PartitionCmd *cmd);
+static void transformPartitionCmd(CreateStmtContext *cxt, PartitionBoundSpec *bound);
 static List *transformPartitionRangeBounds(ParseState *pstate, List *blist,
 										   Relation parent);
 static void validateInfiniteBounds(ParseState *pstate, List *blist);
@@ -3530,6 +3530,40 @@ checkPartition(Relation rel, Oid partRelOid)
 }
 
 /*
+ * transformPartitionCmdForSplit
+ *		Analyze the ALTER TABLE ... SPLIT PARTITION command
+ *
+ * For each new partition sps->bound is set to the transformed value of bound.
+ * Does checks for bounds of new partitions.
+ */
+static void
+transformPartitionCmdForSplit(CreateStmtContext *cxt, PartitionCmd *partcmd)
+{
+	Relation	parent = cxt->rel;
+	Oid			splitPartOid;
+	ListCell   *listptr;
+
+	/* Transform partition bounds for all partitions in the list: */
+	foreach(listptr, partcmd->partlist)
+	{
+		SinglePartitionSpec *sps = (SinglePartitionSpec *) lfirst(listptr);
+
+		cxt->partbound = NULL;
+		transformPartitionCmd(cxt, sps->bound);
+		/* Assign transformed value of the partition bound. */
+		sps->bound = cxt->partbound;
+	}
+
+	splitPartOid = RangeVarGetRelid(partcmd->name, NoLock, false);
+
+	checkPartition(parent, splitPartOid);
+
+	/* Then we should check partitions with transformed bounds. */
+	check_partitions_for_split(parent, splitPartOid, partcmd->name, partcmd->partlist, cxt->pstate);
+}
+
+
+/*
  * transformPartitionCmdForMerge
  *		Analyze the ALTER TABLE ... MERGE PARTITIONS command
  *
@@ -3870,7 +3904,7 @@ transformAlterTableStmt(Oid relid, AlterTableStmt *stmt,
 				{
 					PartitionCmd *partcmd = (PartitionCmd *) cmd->def;
 
-					transformPartitionCmd(&cxt, partcmd);
+					transformPartitionCmd(&cxt, partcmd->bound);
 					/* assign transformed value of the partition bound */
 					partcmd->bound = cxt.partbound;
 				}
@@ -3878,6 +3912,7 @@ transformAlterTableStmt(Oid relid, AlterTableStmt *stmt,
 				newcmds = lappend(newcmds, cmd);
 				break;
 
+			case AT_SplitPartition:
 			case AT_MergePartitions:
 				{
 					PartitionCmd *partcmd = (PartitionCmd *) cmd->def;
@@ -3886,7 +3921,11 @@ transformAlterTableStmt(Oid relid, AlterTableStmt *stmt,
 						ereport(ERROR,
 								(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 								 errmsg("list of new partitions should contain at least two items")));
-					transformPartitionCmdForMerge(&cxt, partcmd);
+
+					if (cmd->subtype == AT_SplitPartition)
+						transformPartitionCmdForSplit(&cxt, partcmd);
+					else
+						transformPartitionCmdForMerge(&cxt, partcmd);
 					newcmds = lappend(newcmds, cmd);
 					break;
 				}
@@ -4321,13 +4360,13 @@ setSchemaName(const char *context_schema, char **stmt_schema_name)
 
 /*
  * transformPartitionCmd
- *		Analyze the ATTACH/DETACH PARTITION command
+ *		Analyze the ATTACH/DETACH/SPLIT PARTITION command
  *
- * In case of the ATTACH PARTITION command, cxt->partbound is set to the
- * transformed value of cmd->bound.
+ * In case of the ATTACH/SPLIT PARTITION command, cxt->partbound is set to the
+ * transformed value of bound.
  */
 static void
-transformPartitionCmd(CreateStmtContext *cxt, PartitionCmd *cmd)
+transformPartitionCmd(CreateStmtContext *cxt, PartitionBoundSpec *bound)
 {
 	Relation	parentRel = cxt->rel;
 
@@ -4336,9 +4375,9 @@ transformPartitionCmd(CreateStmtContext *cxt, PartitionCmd *cmd)
 		case RELKIND_PARTITIONED_TABLE:
 			/* transform the partition bound, if any */
 			Assert(RelationGetPartitionKey(parentRel) != NULL);
-			if (cmd->bound != NULL)
+			if (bound != NULL)
 				cxt->partbound = transformPartitionBound(cxt->pstate, parentRel,
-														 cmd->bound);
+														 bound);
 			break;
 		case RELKIND_PARTITIONED_INDEX:
 
@@ -4346,7 +4385,7 @@ transformPartitionCmd(CreateStmtContext *cxt, PartitionCmd *cmd)
 			 * A partitioned index cannot have a partition bound set.  ALTER
 			 * INDEX prevents that with its grammar, but not ALTER TABLE.
 			 */
-			if (cmd->bound != NULL)
+			if (bound != NULL)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 						 errmsg("\"%s\" is not a partitioned table",
