@@ -119,6 +119,9 @@ extern List *AddRelationNotNullConstraints(Relation rel,
 										   List *constraints,
 										   List *old_notnulls);
 
+extern void StoreConstraints(Relation rel, List *cooked_constraints,
+							 bool is_internal);
+
 extern void RelationClearMissing(Relation rel);
 
 extern void StoreAttrMissingVal(Relation rel, AttrNumber attnum,
