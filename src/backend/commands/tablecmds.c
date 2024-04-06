@@ -740,6 +740,8 @@ static void ATDetachCheckNoForeignKeyRefs(Relation partition);
 static char GetAttributeCompression(Oid atttypid, const char *compression);
 static char GetAttributeStorage(Oid atttypid, const char *storagemode);
 
+static void ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
+								  PartitionCmd *cmd, AlterTableUtilityContext *context);
 
 /* ----------------------------------------------------------------
  *		DefineRelation
@@ -4834,6 +4836,10 @@ AlterTableGetLockLevel(List *cmds)
 				cmd_lockmode = ShareUpdateExclusiveLock;
 				break;
 
+			case AT_MergePartitions:
+				cmd_lockmode = AccessExclusiveLock;
+				break;
+
 			default:			/* oops */
 				elog(ERROR, "unrecognized alter table type: %d",
 					 (int) cmd->subtype);
@@ -5269,6 +5275,11 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 			/* No command-specific prep needed */
 			pass = AT_PASS_MISC;
 			break;
+		case AT_MergePartitions:
+			ATSimplePermissions(cmd->subtype, rel, ATT_PARTITIONED_TABLE);
+			/* No command-specific prep needed */
+			pass = AT_PASS_MISC;
+			break;
 		default:				/* oops */
 			elog(ERROR, "unrecognized alter table type: %d",
 				 (int) cmd->subtype);
@@ -5664,6 +5675,14 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 			break;
 		case AT_DetachPartitionFinalize:
 			address = ATExecDetachPartitionFinalize(rel, ((PartitionCmd *) cmd->def)->name);
+			break;
+		case AT_MergePartitions:
+			cmd = ATParseTransformCmd(wqueue, tab, rel, cmd, false, lockmode,
+									  cur_pass, context);
+			Assert(cmd != NULL);
+			Assert(rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE);
+			ATExecMergePartitions(wqueue, tab, rel, (PartitionCmd *) cmd->def,
+								  context);
 			break;
 		default:				/* oops */
 			elog(ERROR, "unrecognized alter table type: %d",
@@ -6705,6 +6724,8 @@ alter_table_type_to_string(AlterTableType cmdtype)
 			return "DETACH PARTITION";
 		case AT_DetachPartitionFinalize:
 			return "DETACH PARTITION ... FINALIZE";
+		case AT_MergePartitions:
+			return "MERGE PARTITIONS";
 		case AT_AddIdentity:
 			return "ALTER COLUMN ... ADD IDENTITY";
 		case AT_SetIdentity:
@@ -20170,6 +20191,37 @@ QueuePartitionConstraintValidation(List **wqueue, Relation scanrel,
 }
 
 /*
+ * attachPartitionTable: attach a new partition to the partitioned table
+ *
+ * wqueue: the ALTER TABLE work queue; can be NULL when not running as part
+ *   of an ALTER TABLE sequence.
+ * rel: partitioned relation;
+ * attachrel: relation of attached partition;
+ * bound: bounds of attached relation.
+ */
+static void
+attachPartitionTable(List **wqueue, Relation rel, Relation attachrel, PartitionBoundSpec *bound)
+{
+	/* OK to create inheritance.  Rest of the checks performed there */
+	CreateInheritance(attachrel, rel, true);
+
+	/* Update the pg_class entry. */
+	StorePartitionBound(attachrel, rel, bound);
+
+	/* Ensure there exists a correct set of indexes in the partition. */
+	AttachPartitionEnsureIndexes(wqueue, rel, attachrel);
+
+	/* and triggers */
+	CloneRowTriggersToPartition(rel, attachrel);
+
+	/*
+	 * Clone foreign key constraints.  Callee is responsible for setting up
+	 * for phase 3 constraint verification.
+	 */
+	CloneForeignKeyConstraints(wqueue, rel, attachrel);
+}
+
+/*
  * ALTER TABLE <name> ATTACH PARTITION <partition-name> FOR VALUES
  *
  * Return the address of the newly attached partition.
@@ -20372,23 +20424,8 @@ ATExecAttachPartition(List **wqueue, Relation rel, PartitionCmd *cmd,
 	check_new_partition_bound(RelationGetRelationName(attachrel), rel,
 							  cmd->bound, pstate);
 
-	/* OK to create inheritance.  Rest of the checks performed there */
-	CreateInheritance(attachrel, rel, true);
-
-	/* Update the pg_class entry. */
-	StorePartitionBound(attachrel, rel, cmd->bound);
-
-	/* Ensure there exists a correct set of indexes in the partition. */
-	AttachPartitionEnsureIndexes(wqueue, rel, attachrel);
-
-	/* and triggers */
-	CloneRowTriggersToPartition(rel, attachrel);
-
-	/*
-	 * Clone foreign key constraints.  Callee is responsible for setting up
-	 * for phase 3 constraint verification.
-	 */
-	CloneForeignKeyConstraints(wqueue, rel, attachrel);
+	/* Attach a new partition to the partitioned table. */
+	attachPartitionTable(wqueue, rel, attachrel, cmd->bound);
 
 	/*
 	 * Generate partition constraint from the partition bound specification.
@@ -22034,4 +22071,820 @@ GetAttributeStorage(Oid atttypid, const char *storagemode)
 						format_type_be(atttypid))));
 
 	return cstorage;
+}
+
+
+/*
+ * buildExpressionExecutionStates: build the needed expression execution states
+ * for new partition (newPartRel) checks and initialize expressions for
+ * generated columns. All expressions should be created in "tab"
+ * (AlteredTableInfo structure).
+ */
+static void
+buildExpressionExecutionStates(AlteredTableInfo *tab, Relation newPartRel, EState *estate)
+{
+	/* Build the needed expression execution states. */
+	foreach_ptr(NewConstraint, con, tab->constraints)
+	{
+		switch (con->contype)
+		{
+			case CONSTR_CHECK:
+				con->qualstate = ExecPrepareExpr((Expr *) expand_generated_columns_in_expr(con->qual, newPartRel, 1), estate);
+				break;
+			case CONSTR_FOREIGN:
+				/* Nothing to do here. */
+				break;
+			case CONSTR_NOTNULL:
+				/* Nothing to do here. */
+				break;
+			default:
+				elog(ERROR, "unrecognized constraint type: %d",
+					 (int) con->contype);
+		}
+	}
+
+	foreach_ptr(NewColumnValue, ex, tab->newvals)
+	{
+		/* Expression already planned. */
+		ex->exprstate = ExecInitExpr((Expr *) ex->expr, NULL);
+	}
+}
+
+/*
+ * evaluateGeneratedExpressionsAndCheckConstraints: evaluate any generated
+ * expressions for "tab" (AlteredTableInfo structure) whose inputs come from
+ * the new tuple (insertslot) of new partition (newPartRel).
+ */
+static void
+evaluateGeneratedExpressionsAndCheckConstraints(AlteredTableInfo *tab,
+												Relation newPartRel,
+												TupleTableSlot *insertslot,
+												ExprContext *econtext)
+{
+	econtext->ecxt_scantuple = insertslot;
+
+	foreach_ptr(NewColumnValue, ex, tab->newvals)
+	{
+		if (!ex->is_generated)
+			continue;
+
+		insertslot->tts_values[ex->attnum - 1]
+			= ExecEvalExpr(ex->exprstate,
+							econtext,
+							&insertslot->tts_isnull[ex->attnum - 1]);
+	}
+
+	foreach_ptr(NewConstraint, con, tab->constraints)
+	{
+		switch (con->contype)
+		{
+			case CONSTR_CHECK:
+				if (!ExecCheck(con->qualstate, econtext))
+					ereport(ERROR,
+							errcode(ERRCODE_CHECK_VIOLATION),
+							errmsg("check constraint \"%s\" of relation \"%s\" is violated by some row",
+								   con->name, RelationGetRelationName(newPartRel)),
+							errtableconstraint(newPartRel, con->name));
+				break;
+			case CONSTR_NOTNULL:
+			case CONSTR_FOREIGN:
+				/* Nothing to do here */
+				break;
+			default:
+				elog(ERROR, "unrecognized constraint type: %d",
+					 (int) con->contype);
+		}
+	}
+}
+
+/*
+ * getAttributesList: return list of columns (ColumnDef) like model table
+ * (modelRel)
+ */
+static List *
+getAttributesList(Relation modelRel)
+{
+	AttrNumber	parent_attno;
+	TupleDesc	modelDesc;
+	List	   *colList = NIL;
+
+	modelDesc = RelationGetDescr(modelRel);
+
+	for (parent_attno = 1; parent_attno <= modelDesc->natts;
+		 parent_attno++)
+	{
+		Form_pg_attribute attribute = TupleDescAttr(modelDesc,
+													parent_attno - 1);
+		ColumnDef  *def;
+
+		/* Ignore dropped columns in the parent. */
+		if (attribute->attisdropped)
+			continue;
+
+		def = makeColumnDef(NameStr(attribute->attname), attribute->atttypid,
+							attribute->atttypmod, attribute->attcollation);
+
+		def->is_not_null = attribute->attnotnull;
+
+		/* Copy identity for new partition. */
+		def->identity = attribute->attidentity;
+
+		/* Add to column list */
+		colList = lappend(colList, def);
+
+		/*
+		 * Although we don't transfer the column's default/generation
+		 * expression now, we need to mark it GENERATED if appropriate.
+		 */
+		if (attribute->atthasdef && attribute->attgenerated)
+			def->generated = attribute->attgenerated;
+
+		def->storage = attribute->attstorage;
+
+		/* Likewise, copy compression if requested */
+		if (CompressionMethodIsValid(attribute->attcompression))
+			def->compression =
+				pstrdup(GetCompressionMethodName(attribute->attcompression));
+		else
+			def->compression = NULL;
+	}
+
+	return colList;
+}
+
+
+/*
+ * createTableConstraints: create constraints, default values and generated
+ * values (prototype is function expandTableLikeClause).
+ * tab is pending-work queue for newRel, we may need it in moveMergedTablesRows.
+ */
+static void
+createTableConstraints(List **wqueue, AlteredTableInfo *tab,
+					   Relation modelRel, Relation newRel)
+{
+	TupleDesc	tupleDesc;
+	TupleConstr *constr;
+	AttrMap    *attmap;
+	AttrNumber	parent_attno;
+	int			ccnum;
+	List	   *cookedConstraints = NIL;
+
+	tupleDesc = RelationGetDescr(modelRel);
+	constr = tupleDesc->constr;
+
+	if (!constr)
+		return;
+
+	/*
+	 * Construct a map from the LIKE relation's attnos to the child rel's.
+	 * This re-checks type match etc, although it shouldn't be possible to
+	 * have a failure since both tables are locked.
+	 */
+	attmap = build_attrmap_by_name(RelationGetDescr(newRel),
+								   tupleDesc,
+								   false);
+
+	/* Cycle for default values. */
+	for (parent_attno = 1; parent_attno <= tupleDesc->natts; parent_attno++)
+	{
+		Form_pg_attribute attribute = TupleDescAttr(tupleDesc,
+													parent_attno - 1);
+
+		/* Ignore dropped columns in the parent. */
+		if (attribute->attisdropped)
+			continue;
+
+		/* Copy default, if present and it should be copied. */
+		if (attribute->atthasdef)
+		{
+			Node	   *this_default = NULL;
+			bool		found_whole_row;
+			AttrNumber	num;
+			Node	   *def;
+			NewColumnValue *newval;
+
+			if (attribute->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
+				this_default = build_generation_expression(modelRel, attribute->attnum);
+			else
+			{
+				this_default = TupleDescGetDefault(tupleDesc, attribute->attnum);
+				if (this_default == NULL)
+					elog(ERROR, "default expression not found for attribute %d of relation \"%s\"",
+						 attribute->attnum, RelationGetRelationName(modelRel));
+			}
+
+			num = attmap->attnums[parent_attno - 1];
+			def = map_variable_attnos(this_default, 1, 0, attmap, InvalidOid, &found_whole_row);
+
+			/*
+			 * Prevent this for the same reason as for constraints below. Note
+			 * that defaults cannot contain any vars, so it's OK that the
+			 * error message refers to generated columns.
+			 */
+			if (found_whole_row && attribute->attgenerated != '\0')
+				ereport(ERROR,
+						errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("cannot convert whole-row table reference"),
+						errdetail("Generation expression for column \"%s\" contains a whole-row reference to table \"%s\".",
+								 NameStr(attribute->attname),
+								 RelationGetRelationName(modelRel)));
+
+			/* Add a pre-cooked default expression. */
+			StoreAttrDefault(newRel, num, def, true);
+
+			/*
+			 * Stored generated column expressions in modelRel might reference
+			 * tableoid.  newRel, modelRel tableoid clear is not the same. If
+			 * so, these stored generated columns require recomputation for
+			 * newRel within moveMergedTablesRows.
+			*/
+			if (attribute->attgenerated == ATTRIBUTE_GENERATED_STORED)
+			{
+				newval = (NewColumnValue *) palloc0(sizeof(NewColumnValue));
+				newval->attnum = num;
+				newval->expr = expression_planner((Expr *) def);
+				newval->is_generated = (attribute->attgenerated != '\0');
+				tab->newvals = lappend(tab->newvals, newval);
+			}
+		}
+	}
+
+	/* Cycle for CHECK constraints. */
+	for (ccnum = 0; ccnum < constr->num_check; ccnum++)
+	{
+		char	   *ccname = constr->check[ccnum].ccname;
+		char	   *ccbin = constr->check[ccnum].ccbin;
+		bool		ccenforced = constr->check[ccnum].ccenforced;
+		bool		ccnoinherit = constr->check[ccnum].ccnoinherit;
+		bool		ccvalid = constr->check[ccnum].ccvalid;
+		Node	   *ccbin_node;
+		bool		found_whole_row;
+		CookedConstraint *cooked;
+
+		/*
+		 * Partitioned table can not have NO INHERIT check constraint (see
+		 * StoreRelCheck function).
+		 */
+		Assert(!ccnoinherit);
+
+		ccbin_node = map_variable_attnos(stringToNode(ccbin),
+										 1, 0,
+										 attmap,
+										 InvalidOid, &found_whole_row);
+
+		/*
+		 * We reject whole-row variables because the whole point of LIKE is
+		 * that the new table's rowtype might later diverge from the parent's.
+		 * So, while translation might be possible right now, it wouldn't be
+		 * possible to guarantee it would work in future.
+		 */
+		if (found_whole_row)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("cannot convert whole-row table reference"),
+					errdetail("Constraint \"%s\" contains a whole-row reference to table \"%s\".",
+							   ccname,
+							   RelationGetRelationName(modelRel)));
+
+		cooked = (CookedConstraint *) palloc(sizeof(CookedConstraint));
+		cooked->contype = CONSTR_CHECK;
+		cooked->conoid = InvalidOid;
+		cooked->name = ccname;
+		cooked->attnum = 0;
+		cooked->expr = ccbin_node;
+		cooked->is_enforced = ccenforced;
+		cooked->skip_validation = !ccvalid;
+		cooked->is_local = true;
+		cooked->inhcount = 0;
+		cooked->is_no_inherit = ccnoinherit;
+		cookedConstraints = lappend(cookedConstraints, cooked);
+	}
+
+	/* Store CHECK constraints. */
+	StoreConstraints(newRel, cookedConstraints, true);
+
+	/*
+	 * modelRel check constraint expresssion may reference tableoid, so later in
+	 * moveMergedTablesRows, we need evulate the check constraint again for the
+	 * newRel. We can check weather check constraint contain tableoid reference
+	 * or not via pull_varattnos. But unconditionaly revaulate check cosntraint
+	 * seems more safe.
+	*/
+	foreach_ptr(CookedConstraint, ccon, cookedConstraints)
+	{
+		if (!ccon->skip_validation && ccon->contype == CONSTR_CHECK)
+		{
+			Bitmapset	  *attnums = NULL;
+
+			pull_varattnos((Node *) ccon->expr, 1, &attnums);
+
+			/*
+			 * Add check only if it contains tableoid
+			 * (TableOidAttributeNumber).
+			 */
+			if (bms_is_member(TableOidAttributeNumber - FirstLowInvalidHeapAttributeNumber,
+							  attnums))
+			{
+				NewConstraint *newcon;
+
+				newcon = (NewConstraint *) palloc0(sizeof(NewConstraint));
+				newcon->name = ccon->name;
+				newcon->contype = ccon->contype;
+				newcon->qual = ccon->expr;
+
+				tab->constraints = lappend(tab->constraints, newcon);
+			}
+		}
+	}
+
+	/* Don't need the cookedConstraints any more. */
+	list_free_deep(cookedConstraints);
+
+	/* Reproduce not-null constraints. */
+	if (constr->has_not_null)
+	{
+		List	   *nnconstraints;
+
+		/*
+		 * The "include_noinh" argument is false because a partitioned table
+		 * cannot have NO INHERIT constraint.
+		 */
+		nnconstraints = RelationGetNotNullConstraints(RelationGetRelid(modelRel),
+													  false, false);
+
+		Assert(list_length(nnconstraints) > 0);
+
+		/*
+		 * We already set pg_attribute.attnotnull in createPartitionTable. No
+		 * need call set_attnotnull again.
+		*/
+		AddRelationNewConstraints(newRel, NIL, nnconstraints, false, true, true, NULL);
+	}
+}
+
+
+/*
+ * createPartitionTable: create table for a new partition with given name
+ * (newPartName) like table (modelRel, partitioned table). ownerId is
+ * determined by the partition on which the operation is performed, so it
+ * is passed separately.
+ *
+ * Also, this function sets the new partition access method same as parent
+ * table access methods (similarly to CREATE TABLE ... PARTITION OF).  It
+ * checks that parent and child tables have compatible persistence.
+ *
+ * Function returns the created relation (locked in AccessExclusiveLock mode).
+ */
+static Relation
+createPartitionTable(List **wqueue, RangeVar *newPartName,
+					 Relation modelRel, Oid ownerId)
+{
+	Relation	newRel;
+	Oid			newRelId;
+	Oid			existingRelid;
+	TupleDesc	descriptor;
+	List	   *colList = NIL;
+	Oid			relamId;
+	Oid			namespaceId;
+	AlteredTableInfo *new_partrel_tab;
+
+	/* If existing rel is temp, it must belong to this session */
+	if (RELATION_IS_OTHER_TEMP(modelRel))
+		ereport(ERROR,
+				errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				errmsg("cannot create as partition of temporary relation of another session"));
+
+	/* Look up inheritance ancestors and generate relation schema. */
+	colList = getAttributesList(modelRel);
+
+	/* Create a tuple descriptor from the relation schema. */
+	descriptor = BuildDescForRelation(colList);
+
+	/* Look up the access method for new relation. */
+	relamId = (modelRel->rd_rel->relam != InvalidOid) ? modelRel->rd_rel->relam : HEAP_TABLE_AM_OID;
+
+	/* Look up the namespace in which we are supposed to create the relation. */
+	namespaceId =
+		RangeVarGetAndCheckCreationNamespace(newPartName, NoLock, &existingRelid);
+	if (OidIsValid(existingRelid))
+		ereport(ERROR,
+				errcode(ERRCODE_DUPLICATE_TABLE),
+				errmsg("relation \"%s\" already exists", newPartName->relname));
+
+	/* Create the relation. */
+	newRelId = heap_create_with_catalog(newPartName->relname,
+										namespaceId,
+										modelRel->rd_rel->reltablespace,
+										InvalidOid,
+										InvalidOid,
+										InvalidOid,
+										ownerId,
+										relamId,
+										descriptor,
+										NIL,
+										RELKIND_RELATION,
+										newPartName->relpersistence,
+										false,
+										false,
+										ONCOMMIT_NOOP,
+										(Datum) 0,
+										true,
+										allowSystemTableMods,
+										false,
+										InvalidOid,
+										NULL);
+
+	/*
+	 * We must bump the command counter to make the newly-created relation
+	 * tuple visible for opening.
+	 */
+	CommandCounterIncrement();
+
+	/*
+	 * Open the new partition with no lock, because we already have
+	 * AccessExclusiveLock placed there after creation.
+	 */
+	newRel = table_open(newRelId, NoLock);
+
+	/* Find or create work queue entry for newly created table. */
+	new_partrel_tab = ATGetQueueEntry(wqueue, newRel);
+
+	/*
+	 * We intended to create the partition with the same persistence as the
+	 * parent table, but we still need to recheck because that might be
+	 * affected by the search_path.  If the parent is permanent, so must be
+	 * all of its partitions.
+	 */
+	if (modelRel->rd_rel->relpersistence != RELPERSISTENCE_TEMP &&
+		newRel->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+		ereport(ERROR,
+				errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				errmsg("cannot create a temporary relation as partition of permanent relation \"%s\"",
+					   RelationGetRelationName(modelRel)));
+
+	/* Permanent rels cannot be partitions belonging to temporary parent */
+	if (newRel->rd_rel->relpersistence != RELPERSISTENCE_TEMP &&
+		modelRel->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+		ereport(ERROR,
+				errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				errmsg("cannot create a permanent relation as partition of temporary relation \"%s\"",
+					   RelationGetRelationName(modelRel)));
+
+	/* Create constraints, default values and generated values */
+	createTableConstraints(wqueue, new_partrel_tab, modelRel, newRel);
+
+	/*
+	 * Need to call CommandCounterIncrement, so fresh relcache entry have newly
+	 * installed constraint info.
+	 */
+	CommandCounterIncrement();
+
+	return newRel;
+}
+
+/*
+ * moveMergedTablesRows: scan partitions to be merged (mergingPartitionsList)
+ * of the partitioned table (rel) and move rows into the new partition
+ * (newPartRel). We also reevaulate check constraints against these rows.
+ */
+static void
+moveMergedTablesRows(List **wqueue, Relation rel,
+					 List *mergingPartitionsList, Relation newPartRel)
+{
+	CommandId	mycid;
+	EState	   *estate;
+	ExprContext *econtext;
+	AlteredTableInfo *tab;
+	ListCell   *ltab;
+
+	/* The FSM is empty, so don't bother using it. */
+	int			ti_options = TABLE_INSERT_SKIP_FSM;
+	BulkInsertState bistate;	/* state of bulk inserts for partition */
+	TupleTableSlot *dstslot;
+
+	/* Find the work queue entry for new partition table: newPartRel. */
+	tab = ATGetQueueEntry(wqueue, newPartRel);
+
+	/* Generate the constraint and default execution states. */
+	estate = CreateExecutorState();
+
+	buildExpressionExecutionStates(tab, newPartRel, estate);
+
+	econtext = GetPerTupleExprContext(estate);
+
+	mycid = GetCurrentCommandId(true);
+
+	/* Prepare a BulkInsertState for table_tuple_insert. */
+	bistate = GetBulkInsertState();
+
+	/* Create necessary tuple slot. */
+	dstslot = table_slot_create(newPartRel, NULL);
+
+	foreach_ptr(RelationData, mergingPartition, mergingPartitionsList)
+	{
+		TupleTableSlot *srcslot;
+		TupleConversionMap *tuple_map;
+		TableScanDesc scan;
+		Snapshot	snapshot;
+
+		/* Create tuple slot for new partition. */
+		srcslot = table_slot_create(mergingPartition, NULL);
+
+		/*
+		 * Map computing for moving attributes of merged partition to new
+		 * partition.
+		 */
+		tuple_map = convert_tuples_by_name(RelationGetDescr(mergingPartition),
+										   RelationGetDescr(newPartRel));
+
+		/* Scan through the rows. */
+		snapshot = RegisterSnapshot(GetLatestSnapshot());
+		scan = table_beginscan(mergingPartition, snapshot, 0, NULL);
+
+		while (table_scan_getnextslot(scan, ForwardScanDirection, srcslot))
+		{
+			TupleTableSlot *insertslot;
+
+			CHECK_FOR_INTERRUPTS();
+
+			if (tuple_map)
+			{
+				/* Need to use map to copy attributes. */
+				insertslot = execute_attr_map_slot(tuple_map->attrMap, srcslot, dstslot);
+			}
+			else
+			{
+				slot_getallattrs(srcslot);
+
+				/* Copy attributes directly. */
+				insertslot = dstslot;
+
+				ExecClearTuple(insertslot);
+
+				memcpy(insertslot->tts_values, srcslot->tts_values,
+					   sizeof(Datum) * srcslot->tts_nvalid);
+				memcpy(insertslot->tts_isnull, srcslot->tts_isnull,
+					   sizeof(bool) * srcslot->tts_nvalid);
+
+				ExecStoreVirtualTuple(insertslot);
+			}
+
+			/*
+			 * Constraints and GENERATED expressions might reference the
+			 * tableoid column, so fill tts_tableOid with the desired
+			 * value.  (We must do this each time, because it gets
+			 * overwritten with newrel's OID during storing.)
+			 */
+			insertslot->tts_tableOid = RelationGetRelid(newPartRel);
+
+			/*
+			 * Now, evaluate any generated expressions whose inputs come from
+			 * the new tuple.  We assume these columns won't reference each
+			 * other, so that there's no ordering dependency.
+			 */
+			evaluateGeneratedExpressionsAndCheckConstraints(tab, newPartRel,
+															insertslot, econtext);
+
+			/* Write the tuple out to the new relation. */
+			table_tuple_insert(newPartRel, insertslot, mycid,
+							   ti_options, bistate);
+
+			ResetExprContext(econtext);
+		}
+
+		table_endscan(scan);
+		UnregisterSnapshot(snapshot);
+
+		if (tuple_map)
+			free_conversion_map(tuple_map);
+
+		ExecDropSingleTupleTableSlot(srcslot);
+	}
+
+	FreeExecutorState(estate);
+	ExecDropSingleTupleTableSlot(dstslot);
+	FreeBulkInsertState(bistate);
+
+	table_finish_bulk_insert(newPartRel, ti_options);
+
+	/*
+	 * We don't need process this newPartRel since we already processed in here,
+	 * so delete the ALTER TABLE queue of it.
+	 */
+	foreach(ltab, *wqueue)
+	{
+		tab = (AlteredTableInfo *) lfirst(ltab);
+		if (tab->relid == RelationGetRelid(newPartRel))
+			*wqueue = list_delete_cell(*wqueue, ltab);
+	}
+}
+
+/*
+ * detachPartitionTable: detach partition "child_rel" from partitioned table
+ * "parent_rel" with default partition identifier "defaultPartOid"
+ */
+static void
+detachPartitionTable(Relation parent_rel, Relation child_rel, Oid defaultPartOid)
+{
+	/* Remove the pg_inherits row first. */
+	RemoveInheritance(child_rel, parent_rel, false);
+
+	/*
+	 * Detaching the partition might involve TOAST table access, so ensure we
+	 * have a valid snapshot.
+	 */
+	PushActiveSnapshot(GetTransactionSnapshot());
+
+	/* Do the final part of detaching. */
+	DetachPartitionFinalize(parent_rel, child_rel, false, defaultPartOid);
+
+	PopActiveSnapshot();
+}
+
+/*
+ * ALTER TABLE <name> MERGE PARTITIONS <partition-list> INTO <partition-name>
+ */
+static void
+ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
+					  PartitionCmd *cmd, AlterTableUtilityContext *context)
+{
+	Relation	newPartRel;
+	List	   *mergingPartitionsList = NIL;
+	Oid			defaultPartOid;
+	Oid			existingRelid;
+	Oid			ownerId = InvalidOid;
+	Oid			save_userid;
+	int			save_sec_context;
+	int			save_nestlevel;
+
+	/*
+	 * Lock all merged partitions, check them and create list with partitions
+	 * contexts.
+	 */
+	foreach_node(RangeVar, name, cmd->partlist)
+	{
+		Relation	mergingPartition;
+
+		/*
+		 * We are going to detach and remove this partition: need to use
+		 * exclusive lock for preventing DML-queries to the partition.
+		 */
+		mergingPartition = table_openrv(name, AccessExclusiveLock);
+
+		if (OidIsValid(ownerId))
+		{
+			/* Do the partitions being merged have different owners? */
+			if (ownerId != mergingPartition->rd_rel->relowner)
+				ereport(ERROR,
+						errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("partitions being merged have different owners"));
+		}
+		else
+			ownerId = mergingPartition->rd_rel->relowner;
+
+		/* Store a next merging partition into the list. */
+		mergingPartitionsList = lappend(mergingPartitionsList,
+										mergingPartition);
+	}
+
+	/*
+	 * Look up existing relation by new partition name, check we have
+	 * permission to create there, lock it against concurrent drop, and mark
+	 * stmt->relation as RELPERSISTENCE_TEMP if a temporary namespace is
+	 * selected.
+	 */
+	cmd->name->relpersistence = rel->rd_rel->relpersistence;
+	RangeVarGetAndCheckCreationNamespace(cmd->name, NoLock, &existingRelid);
+
+	/*
+	 * Check if this name is already taken.  This helps us to detect the
+	 * situation when one of the merging partitions has the same name as the
+	 * new partition.  Otherwise, this would fail later on anyway but catching
+	 * this here allows us to emit a nicer error message.
+	 */
+	if (OidIsValid(existingRelid))
+	{
+		Relation	sameNamePartition = NULL;
+
+		foreach_ptr(RelationData, mergingPartition, mergingPartitionsList)
+		{
+			if (RelationGetRelid(mergingPartition) == existingRelid)
+			{
+				sameNamePartition = mergingPartition;
+				break;
+			}
+		}
+
+		if (sameNamePartition)
+		{
+			/*
+			 * The new partition has the same name as one of merging
+			 * partitions.
+			 */
+			char		tmpRelName[NAMEDATALEN];
+
+			/* Generate temporary name. */
+			sprintf(tmpRelName, "merge-%u-%X-tmp", RelationGetRelid(rel), MyProcPid);
+
+			/*
+			 * Rename the existing partition with a temporary name, leaving it
+			 * free for the new partition.  We don't need to care about this
+			 * in the future because we're going to eventually drop the
+			 * existing partition anyway.
+			 */
+			RenameRelationInternal(RelationGetRelid(sameNamePartition),
+								   tmpRelName, true, false);
+
+			/*
+			 * We must bump the command counter to make the new partition
+			 * tuple visible for rename.
+			 */
+			CommandCounterIncrement();
+		}
+		else
+		{
+			ereport(ERROR,
+					errcode(ERRCODE_DUPLICATE_TABLE),
+					errmsg("relation \"%s\" already exists", cmd->name->relname));
+		}
+	}
+
+	defaultPartOid =
+		get_default_oid_from_partdesc(RelationGetPartitionDesc(rel, true));
+
+	/*
+	 * Detach all merged partitions.
+	 *
+	 * Perform a preliminary check to determine whether it's safe to drop all
+	 * merging partitions before we actually do so later. After merging rows
+	 * into the new partitions via moveMergedTablesRows, all old partitions need
+	 * be dropped. However, since the drop behavior is DROP_RESTRICT and the
+	 * merge process (moveMergedTablesRows) can be time-consuming, performing an
+	 * early check on the drop eligibility of old partitions is preferable.
+	 */
+	foreach_ptr(RelationData, mergingPartition, mergingPartitionsList)
+	{
+		ObjectAddress object;
+
+		detachPartitionTable(rel, mergingPartition, defaultPartOid);
+
+		/* Get oid of the later to be dropped relation */
+		object.objectId = RelationGetRelid(mergingPartition);
+		object.classId = RelationRelationId;
+		object.objectSubId = 0;
+
+		performDeletionCheck(&object, DROP_RESTRICT, PERFORM_DELETION_INTERNAL);
+	}
+
+	/* Create table for new partition, use partitioned table as model. */
+	Assert(OidIsValid(ownerId));
+	newPartRel = createPartitionTable(wqueue, cmd->name, rel, ownerId);
+
+	/*
+	 * Switch to the table owner's userid, so that any index functions are run
+	 * as that user.  Also lock down security-restricted operations and
+	 * arrange to make GUC variable changes local to this command.
+	 *
+	 * Need to do it after determine namespace in createPartitionTable call.
+	 */
+	GetUserIdAndSecContext(&save_userid, &save_sec_context);
+	SetUserIdAndSecContext(ownerId,
+						   save_sec_context | SECURITY_RESTRICTED_OPERATION);
+	save_nestlevel = NewGUCNestLevel();
+	RestrictSearchPath();
+
+	/* Copy data from merged partitions to new partition. */
+	moveMergedTablesRows(wqueue, rel, mergingPartitionsList, newPartRel);
+
+	/* Drop the current partitions before attaching the new one. */
+	foreach_ptr(RelationData, mergingPartition, mergingPartitionsList)
+	{
+		ObjectAddress object;
+
+		/* Get relation id before table_close() call. */
+		object.objectId = RelationGetRelid(mergingPartition);
+		object.classId = RelationRelationId;
+		object.objectSubId = 0;
+
+		/* Keep the lock until commit. */
+		table_close(mergingPartition, NoLock);
+
+		performDeletion(&object, DROP_RESTRICT, 0);
+	}
+	list_free(mergingPartitionsList);
+
+	/*
+	 * Attach a new partition to the partitioned table. wqueue = NULL:
+	 * verification for each cloned constraint is not needed.
+	 */
+	attachPartitionTable(NULL, rel, newPartRel, cmd->bound);
+
+	/* Keep the lock until commit. */
+	table_close(newPartRel, NoLock);
+
+	/* Roll back any GUC changes executed by index functions. */
+	AtEOXact_GUC(false, save_nestlevel);
+
+	/* Restore userid and security context. */
+	SetUserIdAndSecContext(save_userid, save_sec_context);
 }
