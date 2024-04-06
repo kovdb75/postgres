@@ -39,6 +39,10 @@ ALTER TABLE [ IF EXISTS ] <replaceable class="parameter">name</replaceable>
     DETACH PARTITION <replaceable class="parameter">partition_name</replaceable> [ CONCURRENTLY | FINALIZE ]
 ALTER TABLE [ IF EXISTS ] <replaceable class="parameter">name</replaceable>
     MERGE PARTITIONS (<replaceable class="parameter">partition_name1</replaceable>, <replaceable class="parameter">partition_name2</replaceable> [, ...]) INTO <replaceable class="parameter">partition_name</replaceable>
+ALTER TABLE [ IF EXISTS ] <replaceable class="parameter">name</replaceable>
+    SPLIT PARTITION <replaceable class="parameter">partition_name</replaceable> INTO
+        (PARTITION <replaceable class="parameter">partition_name1</replaceable> { FOR VALUES <replaceable class="parameter">partition_bound_spec</replaceable> | DEFAULT },
+         PARTITION <replaceable class="parameter">partition_name2</replaceable> { FOR VALUES <replaceable class="parameter">partition_bound_spec</replaceable> | DEFAULT } [, ...])
 
 <phrase>where <replaceable class="parameter">action</replaceable> is one of:</phrase>
 
@@ -1161,6 +1165,78 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
     </listitem>
    </varlistentry>
 
+   <varlistentry id="sql-altertable-split-partition">
+    <term><literal>SPLIT PARTITION <replaceable class="parameter">partition_name</replaceable> INTO (PARTITION <replaceable class="parameter">partition_name1</replaceable> { FOR VALUES <replaceable class="parameter">partition_bound_spec</replaceable> | DEFAULT }, PARTITION <replaceable class="parameter">partition_name2</replaceable> { FOR VALUES <replaceable class="parameter">partition_bound_spec</replaceable> | DEFAULT } [, ...])</literal></term>
+
+    <listitem>
+     <para>
+      This form splits a single partition of the target table into a new
+      partitions. Hash-partitioned target table is not supported. Bounds of new
+      partitions should not overlap with new and existing partitions
+      (except <replaceable class="parameter">partition_name</replaceable>).
+      If the split partition is a <literal>DEFAULT</literal> partition, one of
+      the new partitions must be <literal>DEFAULT</literal>.
+      In case one of the new partitions is <literal>DEFAULT</literal>,
+      new partitions <replaceable class="parameter">partition_name1</replaceable>,
+      <replaceable class="parameter">partition_name2</replaceable>, ... can
+      have spaces between partitions bounds.  If the partitioned table does not
+      have a <literal>DEFAULT</literal> partition, the <literal>DEFAULT</literal>
+      partition can be defined as one of the new partitions.
+     </para>
+     <para>
+      In case new partitions do not contain a <literal>DEFAULT</literal>
+      partition, the following must be true: sum bounds of new partitions
+      <replaceable class="parameter">partition_name1</replaceable>,
+      <replaceable class="parameter">partition_name2</replaceable>, ... should
+      be equal to bound of split partition <replaceable class="parameter">partition_name</replaceable>.
+      One of the new partitions <replaceable class="parameter">partition_name1</replaceable>,
+      <replaceable class="parameter">partition_name2</replaceable>, ... can have
+      the same name as split partition <replaceable class="parameter">partition_name</replaceable>
+      (this is suitable in case of splitting a <literal>DEFAULT</literal>
+      partition: we split it, but after splitting we have a partition with the
+      same name).  Only simple, non-partitioned partition can be split.
+     </para>
+     <para>
+      New partitions will have the same owner as the parent partition.
+      It is the user's responsibility to setup <acronym>ACL</acronym> on new
+      partitions.
+     </para>
+     <para>
+      The indexes and identity are created later, after moving the data
+      into the new partitions.
+      Extended statistics aren't copied from the parent table, for consistency with
+      <command>CREATE TABLE PARTITION OF</command>.
+      New partitions will inherit the same table access method, persistence
+      type, and tablespace as the parent table.
+     </para>
+     <para>
+      When partition is split, any individual objects belonging to this
+      partition, such as constraints or statistics will be dropped. This ccurs
+      because <command>ALTER TABLE SPLIT PARTITION</command> uses the partitioned table itself
+      as the template to define these objects.
+     </para>
+     <para>
+      If split partition has some objects dependent on it, the command can
+      not be done (<literal>CASCADE</literal> is not used, an error will be returned).
+     </para>
+     <note>
+      <para>
+       Split partition acquires a <literal>ACCESS EXCLUSIVE</literal> lock on
+       the parent table, in addition to the <literal>ACCESS EXCLUSIVE</literal>
+       lock on the table being split.
+      </para>
+     </note>
+     <note>
+      <para>
+       <command>ALTER TABLE SPLIT PARTITION</command> creates new partitions and
+       moves data from split partition into them, which can take a long time.
+       So it is not recommended to use command for splitting a small fraction of
+       rows out of a very big partition.
+      </para>
+     </note>
+    </listitem>
+   </varlistentry>
+
    <varlistentry id="sql-altertable-merge-partitions">
     <term><literal>MERGE PARTITIONS (<replaceable class="parameter">partition_name1</replaceable>, <replaceable class="parameter">partition_name2</replaceable> [, ...]) INTO <replaceable class="parameter">partition_name</replaceable></literal></term>
 
@@ -1262,7 +1338,8 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
    All the forms of <command>ALTER TABLE</command> that act on a single table,
    except <literal>RENAME</literal>, <literal>SET SCHEMA</literal>,
    <literal>ATTACH PARTITION</literal>, <literal>DETACH PARTITION</literal>,
-   and <literal>MERGE PARTITIONS</literal> can be combined into
+   <literal>SPLIT PARTITION</literal>, and <literal>MERGE PARTITIONS</literal>
+   can be combined into
    a list of multiple alterations to be applied together.  For example, it
    is possible to add several columns and/or alter the type of several
    columns in a single command.  This is particularly useful with large
@@ -1506,7 +1583,7 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       <listitem>
        <para>
         The name of the table to attach as a new partition or to detach from this table,
-        or the name of the new merged partition.
+        or the name of split partition, or the name of the new merged partition.
        </para>
       </listitem>
      </varlistentry>
@@ -1516,7 +1593,8 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       <term><replaceable class="parameter">partition_name2</replaceable></term>
       <listitem>
        <para>
-        The names of the tables being merged into the new partition.
+        The names of the tables being merged into the new partition or split into
+        new partitions.
        </para>
       </listitem>
      </varlistentry>
@@ -1947,6 +2025,24 @@ ALTER TABLE cities
 <programlisting>
 ALTER TABLE measurement
     DETACH PARTITION measurement_y2015m12;
+</programlisting></para>
+
+  <para>
+   To split a single partition of the range-partitioned table:
+<programlisting>
+ALTER TABLE sales_range SPLIT PARTITION sales_feb_mar_apr2023 INTO
+   (PARTITION sales_feb2023 FOR VALUES FROM ('2023-02-01') TO ('2023-03-01'),
+    PARTITION sales_mar2023 FOR VALUES FROM ('2023-03-01') TO ('2023-04-01'),
+    PARTITION sales_apr2023 FOR VALUES FROM ('2023-04-01') TO ('2023-05-01'));
+</programlisting></para>
+
+  <para>
+   To split a single partition of the list-partitioned table:
+<programlisting>
+ALTER TABLE sales_list SPLIT PARTITION sales_all INTO
+   (PARTITION sales_west FOR VALUES IN ('Lisbon', 'New York', 'Madrid'),
+    PARTITION sales_east FOR VALUES IN ('Bejing', 'Delhi', 'Vladivostok'),
+    PARTITION sales_central FOR VALUES IN ('Warsaw', 'Berlin', 'Kyiv'));
 </programlisting></para>
 
   <para>
