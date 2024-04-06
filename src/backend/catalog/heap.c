@@ -105,8 +105,6 @@ static void RelationRemoveInheritance(Oid relid);
 static Oid	StoreRelCheck(Relation rel, const char *ccname, Node *expr,
 						  bool is_enforced, bool is_validated, bool is_local,
 						  int16 inhcount, bool is_no_inherit, bool is_internal);
-static void StoreConstraints(Relation rel, List *cooked_constraints,
-							 bool is_internal);
 static bool MergeWithExistingConstraint(Relation rel, const char *ccname, Node *expr,
 										bool allow_merge, bool is_local,
 										bool is_enforced,
@@ -2296,7 +2294,7 @@ StoreRelNotNull(Relation rel, const char *nnname, AttrNumber attnum,
  * expressions can be added later, by direct calls to StoreAttrDefault
  * and StoreRelCheck (see AddRelationNewConstraints()).
  */
-static void
+void
 StoreConstraints(Relation rel, List *cooked_constraints, bool is_internal)
 {
 	int			numchecks = 0;
