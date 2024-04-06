@@ -970,7 +970,7 @@ typedef struct SinglePartitionSpec
 typedef struct PartitionCmd
 {
 	NodeTag		type;
-	RangeVar   *name;			/* name of partition to attach/detach/merge */
+	RangeVar   *name;			/* name of partition to attach/detach/merge/split */
 	PartitionBoundSpec *bound;	/* FOR VALUES, if attaching */
 	List	   *partlist;		/* list of partitions, for MERGE/SPLIT
 								 * PARTITION command */
@@ -2486,6 +2486,7 @@ typedef enum AlterTableType
 	AT_AttachPartition,			/* ATTACH PARTITION */
 	AT_DetachPartition,			/* DETACH PARTITION */
 	AT_DetachPartitionFinalize, /* DETACH PARTITION FINALIZE */
+	AT_SplitPartition,			/* SPLIT PARTITION */
 	AT_MergePartitions,			/* MERGE PARTITIONS */
 	AT_AddIdentity,				/* ADD IDENTITY */
 	AT_SetIdentity,				/* SET identity column options */
