@@ -3415,13 +3415,12 @@ transformRuleStmt(RuleStmt *stmt, const char *queryString,
 	table_close(rel, NoLock);
 }
 
-
 /*
- * checkPartition
+ * checkOldPartition
  *		Check that partRelOid is an oid of partition of the parent table rel
  */
 static void
-checkPartition(Relation rel, Oid partRelOid)
+checkOldPartition(Relation rel, Oid partRelOid)
 {
 	Relation	partRel;
 
@@ -3430,7 +3429,7 @@ checkPartition(Relation rel, Oid partRelOid)
 	if (partRel->rd_rel->relkind != RELKIND_RELATION)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not a table",
+				 errmsg("\"%s\" is not an ordinary table",
 						RelationGetRelationName(partRel))));
 
 	if (!partRel->rd_rel->relispartition)
@@ -3447,6 +3446,26 @@ checkPartition(Relation rel, Oid partRelOid)
 						RelationGetRelationName(rel))));
 
 	relation_close(partRel, AccessShareLock);
+}
+
+/*
+ * checkNewPartition
+ *		Check that the new partition has the correct namespace.
+ */
+static void
+checkNewPartition(Relation rel, RangeVar *partName)
+{
+	Oid			nspid;
+
+	nspid = RangeVarGetCreationNamespace(partName);
+
+	/* If the parent table is permanent, so must be all of its partitions. */
+	if (rel->rd_rel->relpersistence != RELPERSISTENCE_TEMP &&
+		isTempOrTempToastNamespace(nspid))
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("cannot create a temporary relation as partition of permanent relation \"%s\"",
+						RelationGetRelationName(rel))));
 }
 
 /*
@@ -3477,11 +3496,13 @@ transformPartitionCmdForSplit(CreateStmtContext *cxt, PartitionCmd *partcmd)
 		transformPartitionCmd(cxt, sps->bound);
 		/* Assign transformed value of the partition bound. */
 		sps->bound = cxt->partbound;
+		/* Check that the new partition has the correct namespace. */
+		checkNewPartition(parent, sps->name);
 	}
 
 	splitPartOid = RangeVarGetRelid(partcmd->name, NoLock, false);
 
-	checkPartition(parent, splitPartOid);
+	checkOldPartition(parent, splitPartOid);
 
 	/* Then we should check partitions with transformed bounds. */
 	check_partitions_for_split(parent, splitPartOid, partcmd->name, partcmd->partlist, cxt->pstate);
@@ -3521,6 +3542,9 @@ transformPartitionCmdForMerge(CreateStmtContext *cxt, PartitionCmd *partcmd)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("partition of hash-partitioned table cannot be merged")));
 
+	/* Check that the new partition has the correct namespace. */
+	checkNewPartition(parent, partcmd->name);
+
 	/* Is current partition a DEFAULT partition? */
 	defaultPartOid = get_default_oid_from_partdesc(
 												   RelationGetPartitionDesc(parent, true));
@@ -3546,7 +3570,7 @@ transformPartitionCmdForMerge(CreateStmtContext *cxt, PartitionCmd *partcmd)
 		if (partOid == defaultPartOid)
 			isDefaultPart = true;
 
-		checkPartition(parent, partOid);
+		checkOldPartition(parent, partOid);
 
 		partOids = lappend_oid(partOids, partOid);
 	}

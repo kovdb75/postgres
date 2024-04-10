@@ -21124,16 +21124,18 @@ moveSplitTableRows(Relation rel, Relation splitRel, List *partlist, List *newPar
  * createPartitionTable: create table for a new partition with given name
  * (newPartName) like table (modelRelName)
  *
- * Emulates command: CREATE TABLE <newPartName> (LIKE <modelRelName>
+ * Emulates command: CREATE [TEMP] TABLE <newPartName> (LIKE <modelRelName>
  * INCLUDING ALL EXCLUDING INDEXES EXCLUDING IDENTITY)
  */
 static void
-createPartitionTable(RangeVar *newPartName, RangeVar *modelRelName,
+createPartitionTable(Relation rel, RangeVar *newPartName, RangeVar *modelRelName,
 					 AlterTableUtilityContext *context)
 {
 	CreateStmt *createStmt;
 	TableLikeClause *tlc;
 	PlannedStmt *wrapper;
+
+	newPartName->relpersistence = rel->rd_rel->relpersistence;
 
 	createStmt = makeNode(CreateStmt);
 	createStmt->relation = newPartName;
@@ -21270,7 +21272,7 @@ ATExecSplitPartition(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		SinglePartitionSpec *sps = (SinglePartitionSpec *) lfirst(listptr);
 		Relation	newPartRel;
 
-		createPartitionTable(sps->name, parentName, context);
+		createPartitionTable(rel, sps->name, parentName, context);
 
 		/* Open the new partition and acquire exclusive lock on it. */
 		newPartRel = table_openrv(sps->name, AccessExclusiveLock);
@@ -21463,10 +21465,10 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	{
 		/* Create partition table with generated temparary name. */
 		sprintf(tmpRelName, "merge-%u-%X-tmp", RelationGetRelid(rel), MyProcPid);
-		mergePartName = makeRangeVar(get_namespace_name(RelationGetNamespace(rel)),
-									 tmpRelName, -1);
+		mergePartName = makeRangeVar(cmd->name->schemaname, tmpRelName, -1);
 	}
-	createPartitionTable(mergePartName,
+	createPartitionTable(rel,
+						 mergePartName,
 						 makeRangeVar(get_namespace_name(RelationGetNamespace(rel)),
 									  RelationGetRelationName(rel), -1),
 						 context);
@@ -21481,12 +21483,6 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 
 	/* Copy data from merged partitions to new partition. */
 	moveMergedTablesRows(rel, mergingPartitionsList, newPartRel);
-
-	/*
-	 * Attach a new partition to the partitioned table. wqueue = NULL:
-	 * verification for each cloned constraint is not need.
-	 */
-	attachPartitionTable(NULL, rel, newPartRel, cmd->bound);
 
 	/* Unlock and drop merged partitions. */
 	foreach(listptr, mergingPartitionsList)
@@ -21517,7 +21513,19 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		/* Rename partition. */
 		RenameRelationInternal(RelationGetRelid(newPartRel),
 							   cmd->name->relname, false, false);
+		/*
+		 * Bump the command counter to make the tuple of renamed partition
+		 * visible for attach partition operation.
+		 */
+		CommandCounterIncrement();
 	}
+
+	/*
+	 * Attach a new partition to the partitioned table. wqueue = NULL:
+	 * verification for each cloned constraint is not needed.
+	 */
+	attachPartitionTable(NULL, rel, newPartRel, cmd->bound);
+
 	/* Keep the lock until commit. */
 	table_close(newPartRel, NoLock);
 }
