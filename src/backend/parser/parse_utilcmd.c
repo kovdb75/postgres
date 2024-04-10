@@ -3430,7 +3430,7 @@ checkPartition(Relation rel, Oid partRelOid)
 	if (partRel->rd_rel->relkind != RELKIND_RELATION)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not a table",
+				 errmsg("\"%s\" is not an ordinary table",
 						RelationGetRelationName(partRel))));
 
 	if (!partRel->rd_rel->relispartition)

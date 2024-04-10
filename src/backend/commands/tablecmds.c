@@ -21124,16 +21124,24 @@ moveSplitTableRows(Relation rel, Relation splitRel, List *partlist, List *newPar
  * createPartitionTable: create table for a new partition with given name
  * (newPartName) like table (modelRelName)
  *
- * Emulates command: CREATE TABLE <newPartName> (LIKE <modelRelName>
+ * Emulates command: CREATE [TEMP] TABLE <newPartName> (LIKE <modelRelName>
  * INCLUDING ALL EXCLUDING INDEXES EXCLUDING IDENTITY)
  */
-static void
-createPartitionTable(RangeVar *newPartName, RangeVar *modelRelName,
+static Relation
+createPartitionTable(Relation rel, RangeVar *newPartName, RangeVar *modelRelName,
 					 AlterTableUtilityContext *context)
 {
 	CreateStmt *createStmt;
 	TableLikeClause *tlc;
 	PlannedStmt *wrapper;
+	Relation	newRel;
+
+	/* If existing rel is temp, it must belong to this session */
+	if (rel->rd_rel->relpersistence == RELPERSISTENCE_TEMP &&
+		!rel->rd_islocaltemp)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("cannot create as partition of temporary relation of another session")));
 
 	createStmt = makeNode(CreateStmt);
 	createStmt->relation = newPartName;
@@ -21172,6 +21180,35 @@ createPartitionTable(RangeVar *newPartName, RangeVar *modelRelName,
 				   NULL,
 				   None_Receiver,
 				   NULL);
+
+	/*
+	 * Open the new partition and acquire exclusive lock on it.  This will
+	 * stop all the operations with partitioned table.  This might seem
+	 * excessive, but this is the way we make sure nobody is planning queries
+	 * involving merging partitions.
+	 */
+	newRel = table_openrv(newPartName, AccessExclusiveLock);
+
+	/*
+	 * If the parent is permanent, so must be all of its partitions.  Note
+	 * that inheritance allows that case.
+	 */
+	if (rel->rd_rel->relpersistence != RELPERSISTENCE_TEMP &&
+		newRel->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("cannot create a temporary relation as partition of permanent relation \"%s\"",
+						RelationGetRelationName(rel))));
+
+	/* Permanent rels cannot inherit from temporary ones */
+	if (newRel->rd_rel->relpersistence != RELPERSISTENCE_TEMP &&
+		rel->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("cannot create a permanent relation as partition of temporary relation \"%s\"",
+						RelationGetRelationName(rel))));
+
+	return newRel;
 }
 
 /*
@@ -21270,11 +21307,7 @@ ATExecSplitPartition(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		SinglePartitionSpec *sps = (SinglePartitionSpec *) lfirst(listptr);
 		Relation	newPartRel;
 
-		createPartitionTable(sps->name, parentName, context);
-
-		/* Open the new partition and acquire exclusive lock on it. */
-		newPartRel = table_openrv(sps->name, AccessExclusiveLock);
-
+		newPartRel = createPartitionTable(rel, sps->name, parentName, context);
 		newPartRels = lappend(newPartRels, newPartRel);
 	}
 
@@ -21466,27 +21499,15 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		mergePartName = makeRangeVar(get_namespace_name(RelationGetNamespace(rel)),
 									 tmpRelName, -1);
 	}
-	createPartitionTable(mergePartName,
-						 makeRangeVar(get_namespace_name(RelationGetNamespace(rel)),
-									  RelationGetRelationName(rel), -1),
-						 context);
 
-	/*
-	 * Open the new partition and acquire exclusive lock on it.  This will
-	 * stop all the operations with partitioned table.  This might seem
-	 * excessive, but this is the way we make sure nobody is planning queries
-	 * involving merging partitions.
-	 */
-	newPartRel = table_openrv(mergePartName, AccessExclusiveLock);
+	newPartRel = createPartitionTable(rel,
+									  mergePartName,
+									  makeRangeVar(get_namespace_name(RelationGetNamespace(rel)),
+												   RelationGetRelationName(rel), -1),
+									  context);
 
 	/* Copy data from merged partitions to new partition. */
 	moveMergedTablesRows(rel, mergingPartitionsList, newPartRel);
-
-	/*
-	 * Attach a new partition to the partitioned table. wqueue = NULL:
-	 * verification for each cloned constraint is not need.
-	 */
-	attachPartitionTable(NULL, rel, newPartRel, cmd->bound);
 
 	/* Unlock and drop merged partitions. */
 	foreach(listptr, mergingPartitionsList)
@@ -21517,7 +21538,20 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		/* Rename partition. */
 		RenameRelationInternal(RelationGetRelid(newPartRel),
 							   cmd->name->relname, false, false);
+
+		/*
+		 * Bump the command counter to make the tuple of renamed partition
+		 * visible for attach partition operation.
+		 */
+		CommandCounterIncrement();
 	}
+
+	/*
+	 * Attach a new partition to the partitioned table. wqueue = NULL:
+	 * verification for each cloned constraint is not needed.
+	 */
+	attachPartitionTable(NULL, rel, newPartRel, cmd->bound);
+
 	/* Keep the lock until commit. */
 	table_close(newPartRel, NoLock);
 }
