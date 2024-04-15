@@ -21126,6 +21126,7 @@ moveSplitTableRows(Relation rel, Relation splitRel, List *partlist, List *newPar
  *
  * Emulates command: CREATE [TEMP] TABLE <newPartName> (LIKE <modelRelName>
  * INCLUDING ALL EXCLUDING INDEXES EXCLUDING IDENTITY)
+ * Function locks created relation in AccessExclusiveLock mode and returns it.
  */
 static Relation
 createPartitionTable(Relation rel, RangeVar *newPartName, RangeVar *modelRelName,
@@ -21496,8 +21497,7 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	{
 		/* Create partition table with generated temparary name. */
 		sprintf(tmpRelName, "merge-%u-%X-tmp", RelationGetRelid(rel), MyProcPid);
-		mergePartName = makeRangeVar(get_namespace_name(RelationGetNamespace(rel)),
-									 tmpRelName, -1);
+		mergePartName = makeRangeVar(cmd->name->schemaname, tmpRelName, -1);
 	}
 
 	newPartRel = createPartitionTable(rel,

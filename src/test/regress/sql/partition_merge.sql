@@ -484,24 +484,42 @@ SELECT indexname FROM pg_indexes WHERE tablename = 'tp_1_2';
 DROP TABLE t;
 
 --
--- Try creating a partition in the temporary schema.
+-- Try mixing permanent and temporary partitions.
 --
 SET search_path = public, pg_temp;
 CREATE TABLE t (i int) PARTITION BY RANGE (i);
 CREATE TABLE tp_0_1 PARTITION OF t FOR VALUES FROM (0) TO (1);
 CREATE TABLE tp_1_2 PARTITION OF t FOR VALUES FROM (1) TO (2);
 
+SELECT c.oid::pg_catalog.regclass, c.relpersistence FROM pg_catalog.pg_class c WHERE c.oid = 't'::regclass;
+SELECT c.oid::pg_catalog.regclass, pg_catalog.pg_get_expr(c.relpartbound, c.oid), c.relpersistence
+  FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+  WHERE c.oid = i.inhrelid AND i.inhparent = 't'::regclass
+  ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text;
+
 SET search_path = pg_temp, public;
 
 -- Can't merge persistent partitions into a temporary partition
 ALTER TABLE t MERGE PARTITIONS (tp_0_1, tp_1_2) INTO tp_0_2;
+
+RESET search_path;
+
+-- Can't merge persistent partitions into a temporary partition
+ALTER TABLE t MERGE PARTITIONS (tp_0_1, tp_1_2) INTO pg_temp.tp_0_2;
 DROP TABLE t;
-DROP TAble tp_0_2;
+
+SET search_path = pg_temp, public;
 
 BEGIN;
 CREATE TABLE t (i int) PARTITION BY RANGE (i);
 CREATE TABLE tp_0_1 PARTITION OF t FOR VALUES FROM (0) TO (1);
 CREATE TABLE tp_1_2 PARTITION OF t FOR VALUES FROM (1) TO (2);
+
+SELECT c.oid::pg_catalog.regclass, c.relpersistence FROM pg_catalog.pg_class c WHERE c.oid = 't'::regclass;
+SELECT c.oid::pg_catalog.regclass, pg_catalog.pg_get_expr(c.relpartbound, c.oid), c.relpersistence
+  FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+  WHERE c.oid = i.inhrelid AND i.inhparent = 't'::regclass
+  ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text;
 
 SET search_path = public, pg_temp;
 
