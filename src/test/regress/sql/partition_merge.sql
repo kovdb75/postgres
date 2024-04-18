@@ -445,6 +445,28 @@ DROP TABLE t2;
 DROP TABLE t1;
 
 --
+-- Try to MERGE partitions of temporary table.
+--
+CREATE TEMP TABLE t (i int) PARTITION BY RANGE (i);
+CREATE TEMP TABLE tp_0_1 PARTITION OF t FOR VALUES FROM (0) TO (1);
+CREATE TEMP TABLE tp_1_2 PARTITION OF t FOR VALUES FROM (1) TO (2);
+
+SELECT c.oid::pg_catalog.regclass, pg_catalog.pg_get_expr(c.relpartbound, c.oid), c.relpersistence
+  FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+  WHERE c.oid = i.inhrelid AND i.inhparent = 't'::regclass
+  ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text;
+
+ALTER TABLE t MERGE PARTITIONS (tp_0_1, tp_1_2) INTO tp_0_2;
+
+-- Partition should be temporary.
+SELECT c.oid::pg_catalog.regclass, pg_catalog.pg_get_expr(c.relpartbound, c.oid), c.relpersistence
+  FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+  WHERE c.oid = i.inhrelid AND i.inhparent = 't'::regclass
+  ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text;
+
+DROP TABLE t;
+
+--
 -- Check the partition index name if the partition name is the same as one
 -- of the merged partitions.
 --
@@ -461,6 +483,52 @@ SELECT indexname FROM pg_indexes
 WHERE tablename = 'tp_1_2' AND schemaname = 'partitions_merge_schema';
 
 DROP TABLE t;
+
+--
+-- Try mixing permanent and temporary partitions.
+--
+SET search_path = public, pg_temp;
+CREATE TABLE t (i int) PARTITION BY RANGE (i);
+CREATE TABLE tp_0_1 PARTITION OF t FOR VALUES FROM (0) TO (1);
+CREATE TABLE tp_1_2 PARTITION OF t FOR VALUES FROM (1) TO (2);
+
+SELECT c.oid::pg_catalog.regclass, c.relpersistence FROM pg_catalog.pg_class c WHERE c.oid = 't'::regclass;
+SELECT c.oid::pg_catalog.regclass, pg_catalog.pg_get_expr(c.relpartbound, c.oid), c.relpersistence
+  FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+  WHERE c.oid = i.inhrelid AND i.inhparent = 't'::regclass
+  ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text;
+
+SET search_path = pg_temp, public;
+
+-- Can't merge persistent partitions into a temporary partition
+ALTER TABLE t MERGE PARTITIONS (tp_0_1, tp_1_2) INTO tp_0_2;
+
+RESET search_path;
+
+-- Can't merge persistent partitions into a temporary partition
+ALTER TABLE t MERGE PARTITIONS (tp_0_1, tp_1_2) INTO pg_temp.tp_0_2;
+DROP TABLE t;
+
+SET search_path = pg_temp, public;
+
+BEGIN;
+CREATE TABLE t (i int) PARTITION BY RANGE (i);
+CREATE TABLE tp_0_1 PARTITION OF t FOR VALUES FROM (0) TO (1);
+CREATE TABLE tp_1_2 PARTITION OF t FOR VALUES FROM (1) TO (2);
+
+SELECT c.oid::pg_catalog.regclass, c.relpersistence FROM pg_catalog.pg_class c WHERE c.oid = 't'::regclass;
+SELECT c.oid::pg_catalog.regclass, pg_catalog.pg_get_expr(c.relpartbound, c.oid), c.relpersistence
+  FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+  WHERE c.oid = i.inhrelid AND i.inhparent = 't'::regclass
+  ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text;
+
+SET search_path = public, pg_temp;
+
+-- Can't merge temporary partitions into a persistent partition
+ALTER TABLE t MERGE PARTITIONS (tp_0_1, tp_1_2) INTO tp_0_2;
+ROLLBACK;
+
+RESET search_path;
 
 --
 DROP SCHEMA partitions_merge_schema;

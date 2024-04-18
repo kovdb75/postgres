@@ -21184,16 +21184,25 @@ moveSplitTableRows(Relation rel, Relation splitRel, List *partlist, List *newPar
  * createPartitionTable: create table for a new partition with given name
  * (newPartName) like table (modelRelName)
  *
- * Emulates command: CREATE TABLE <newPartName> (LIKE <modelRelName>
+ * Emulates command: CREATE [TEMP] TABLE <newPartName> (LIKE <modelRelName>
  * INCLUDING ALL EXCLUDING INDEXES EXCLUDING IDENTITY)
+ * Function returns the created relation (locked in AccessExclusiveLock mode).
  */
-static void
-createPartitionTable(RangeVar *newPartName, RangeVar *modelRelName,
+static Relation
+createPartitionTable(Relation rel, RangeVar *newPartName, RangeVar *modelRelName,
 					 AlterTableUtilityContext *context)
 {
 	CreateStmt *createStmt;
 	TableLikeClause *tlc;
 	PlannedStmt *wrapper;
+	Relation	newRel;
+
+	/* If existing rel is temp, it must belong to this session */
+	if (rel->rd_rel->relpersistence == RELPERSISTENCE_TEMP &&
+		!rel->rd_islocaltemp)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("cannot create as partition of temporary relation of another session")));
 
 	createStmt = makeNode(CreateStmt);
 	createStmt->relation = newPartName;
@@ -21232,6 +21241,33 @@ createPartitionTable(RangeVar *newPartName, RangeVar *modelRelName,
 				   NULL,
 				   None_Receiver,
 				   NULL);
+
+	/*
+	 * Open the new partition with no lock, because we already have
+	 * AccessExclusiveLock placed there after creation.
+	 */
+	newRel = table_openrv(newPartName, NoLock);
+
+	/*
+	 * If the parent is permanent, so must be all of its partitions.  Note
+	 * that inheritance allows that case.
+	 */
+	if (rel->rd_rel->relpersistence != RELPERSISTENCE_TEMP &&
+		newRel->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("cannot create a temporary relation as partition of permanent relation \"%s\"",
+						RelationGetRelationName(rel))));
+
+	/* Permanent rels cannot inherit from temporary ones */
+	if (newRel->rd_rel->relpersistence != RELPERSISTENCE_TEMP &&
+		rel->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("cannot create a permanent relation as partition of temporary relation \"%s\"",
+						RelationGetRelationName(rel))));
+
+	return newRel;
 }
 
 /*
@@ -21330,11 +21366,7 @@ ATExecSplitPartition(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		SinglePartitionSpec *sps = (SinglePartitionSpec *) lfirst(listptr);
 		Relation	newPartRel;
 
-		createPartitionTable(sps->name, parentName, context);
-
-		/* Open the new partition and acquire exclusive lock on it. */
-		newPartRel = table_openrv(sps->name, AccessExclusiveLock);
-
+		newPartRel = createPartitionTable(rel, sps->name, parentName, context);
 		newPartRels = lappend(newPartRels, newPartRel);
 	}
 
@@ -21526,21 +21558,14 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	{
 		/* Create partition table with generated temporary name. */
 		sprintf(tmpRelName, "merge-%u-%X-tmp", RelationGetRelid(rel), MyProcPid);
-		mergePartName = makeRangeVar(get_namespace_name(RelationGetNamespace(rel)),
-									 tmpRelName, -1);
+		mergePartName = makeRangeVar(cmd->name->schemaname, tmpRelName, -1);
 	}
-	createPartitionTable(mergePartName,
-						 makeRangeVar(get_namespace_name(RelationGetNamespace(rel)),
-									  RelationGetRelationName(rel), -1),
-						 context);
 
-	/*
-	 * Open the new partition and acquire exclusive lock on it.  This will
-	 * stop all the operations with partitioned table.  This might seem
-	 * excessive, but this is the way we make sure nobody is planning queries
-	 * involving merging partitions.
-	 */
-	newPartRel = table_openrv(mergePartName, AccessExclusiveLock);
+	newPartRel = createPartitionTable(rel,
+									  mergePartName,
+									  makeRangeVar(get_namespace_name(RelationGetNamespace(rel)),
+												   RelationGetRelationName(rel), -1),
+									  context);
 
 	/* Copy data from merged partitions to new partition. */
 	moveMergedTablesRows(rel, mergingPartitionsList, newPartRel);

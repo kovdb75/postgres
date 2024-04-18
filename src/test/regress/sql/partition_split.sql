@@ -845,4 +845,27 @@ DROP TABLE t2;
 DROP TABLE t1;
 
 --
+-- Try to SPLIT partition of temporary table.
+--
+CREATE TEMP TABLE t (i int) PARTITION BY RANGE (i);
+CREATE TEMP TABLE tp_0_2 PARTITION OF t FOR VALUES FROM (0) TO (2);
+
+SELECT c.oid::pg_catalog.regclass, pg_catalog.pg_get_expr(c.relpartbound, c.oid), c.relpersistence
+  FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+  WHERE c.oid = i.inhrelid AND i.inhparent = 't'::regclass
+  ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text;
+
+ALTER TABLE t SPLIT PARTITION tp_0_2 INTO
+  (PARTITION tp_0_1 FOR VALUES FROM (0) TO (1),
+   PARTITION tp_1_2 FOR VALUES FROM (1) TO (2));
+
+-- Partitions should be temporary.
+SELECT c.oid::pg_catalog.regclass, pg_catalog.pg_get_expr(c.relpartbound, c.oid), c.relpersistence
+  FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+  WHERE c.oid = i.inhrelid AND i.inhparent = 't'::regclass
+  ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text;
+
+DROP TABLE t;
+
+--
 DROP SCHEMA partition_split_schema;

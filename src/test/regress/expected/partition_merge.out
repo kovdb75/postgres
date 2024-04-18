@@ -746,6 +746,36 @@ DROP TABLE t3;
 DROP TABLE t2;
 DROP TABLE t1;
 --
+-- Try to MERGE partitions of temporary table.
+--
+CREATE TEMP TABLE t (i int) PARTITION BY RANGE (i);
+CREATE TEMP TABLE tp_0_1 PARTITION OF t FOR VALUES FROM (0) TO (1);
+CREATE TEMP TABLE tp_1_2 PARTITION OF t FOR VALUES FROM (1) TO (2);
+SELECT c.oid::pg_catalog.regclass, pg_catalog.pg_get_expr(c.relpartbound, c.oid), c.relpersistence
+  FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+  WHERE c.oid = i.inhrelid AND i.inhparent = 't'::regclass
+  ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text;
+  oid   |        pg_get_expr         | relpersistence 
+--------+----------------------------+----------------
+ tp_0_1 | FOR VALUES FROM (0) TO (1) | t
+ tp_1_2 | FOR VALUES FROM (1) TO (2) | t
+(2 rows)
+
+ALTER TABLE t MERGE PARTITIONS (tp_0_1, tp_1_2) INTO tp_0_2;
+ERROR:  cannot create a permanent relation as partition of temporary relation "t"
+-- Partition should be temporary.
+SELECT c.oid::pg_catalog.regclass, pg_catalog.pg_get_expr(c.relpartbound, c.oid), c.relpersistence
+  FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+  WHERE c.oid = i.inhrelid AND i.inhparent = 't'::regclass
+  ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text;
+  oid   |        pg_get_expr         | relpersistence 
+--------+----------------------------+----------------
+ tp_0_1 | FOR VALUES FROM (0) TO (1) | t
+ tp_1_2 | FOR VALUES FROM (1) TO (2) | t
+(2 rows)
+
+DROP TABLE t;
+--
 -- Check the partition index name if the partition name is the same as one
 -- of the merged partitions.
 --
@@ -763,5 +793,64 @@ WHERE tablename = 'tp_1_2' AND schemaname = 'partitions_merge_schema';
 (1 row)
 
 DROP TABLE t;
+--
+-- Try mixing permanent and temporary partitions.
+--
+SET search_path = public, pg_temp;
+CREATE TABLE t (i int) PARTITION BY RANGE (i);
+CREATE TABLE tp_0_1 PARTITION OF t FOR VALUES FROM (0) TO (1);
+CREATE TABLE tp_1_2 PARTITION OF t FOR VALUES FROM (1) TO (2);
+SELECT c.oid::pg_catalog.regclass, c.relpersistence FROM pg_catalog.pg_class c WHERE c.oid = 't'::regclass;
+ oid | relpersistence 
+-----+----------------
+ t   | p
+(1 row)
+
+SELECT c.oid::pg_catalog.regclass, pg_catalog.pg_get_expr(c.relpartbound, c.oid), c.relpersistence
+  FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+  WHERE c.oid = i.inhrelid AND i.inhparent = 't'::regclass
+  ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text;
+  oid   |        pg_get_expr         | relpersistence 
+--------+----------------------------+----------------
+ tp_0_1 | FOR VALUES FROM (0) TO (1) | p
+ tp_1_2 | FOR VALUES FROM (1) TO (2) | p
+(2 rows)
+
+SET search_path = pg_temp, public;
+-- Can't merge persistent partitions into a temporary partition
+ALTER TABLE t MERGE PARTITIONS (tp_0_1, tp_1_2) INTO tp_0_2;
+ERROR:  cannot create a temporary relation as partition of permanent relation "t"
+RESET search_path;
+-- Can't merge persistent partitions into a temporary partition
+ALTER TABLE t MERGE PARTITIONS (tp_0_1, tp_1_2) INTO pg_temp.tp_0_2;
+ERROR:  cannot create a temporary relation as partition of permanent relation "t"
+DROP TABLE t;
+SET search_path = pg_temp, public;
+BEGIN;
+CREATE TABLE t (i int) PARTITION BY RANGE (i);
+CREATE TABLE tp_0_1 PARTITION OF t FOR VALUES FROM (0) TO (1);
+CREATE TABLE tp_1_2 PARTITION OF t FOR VALUES FROM (1) TO (2);
+SELECT c.oid::pg_catalog.regclass, c.relpersistence FROM pg_catalog.pg_class c WHERE c.oid = 't'::regclass;
+ oid | relpersistence 
+-----+----------------
+ t   | t
+(1 row)
+
+SELECT c.oid::pg_catalog.regclass, pg_catalog.pg_get_expr(c.relpartbound, c.oid), c.relpersistence
+  FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+  WHERE c.oid = i.inhrelid AND i.inhparent = 't'::regclass
+  ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text;
+  oid   |        pg_get_expr         | relpersistence 
+--------+----------------------------+----------------
+ tp_0_1 | FOR VALUES FROM (0) TO (1) | t
+ tp_1_2 | FOR VALUES FROM (1) TO (2) | t
+(2 rows)
+
+SET search_path = public, pg_temp;
+-- Can't merge temporary partitions into a persistent partition
+ALTER TABLE t MERGE PARTITIONS (tp_0_1, tp_1_2) INTO tp_0_2;
+ERROR:  cannot create a permanent relation as partition of temporary relation "t"
+ROLLBACK;
+RESET search_path;
 --
 DROP SCHEMA partitions_merge_schema;
