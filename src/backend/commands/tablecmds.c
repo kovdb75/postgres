@@ -21508,9 +21508,6 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	ListCell   *listptr;
 	List	   *mergingPartitionsList = NIL;
 	Oid			defaultPartOid;
-	char		tmpRelName[NAMEDATALEN];
-	RangeVar   *mergePartName = cmd->name;
-	bool		isSameName = false;
 
 	/*
 	 * Lock all merged partitions, check them and create list with partitions
@@ -21532,8 +21529,22 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		 * function transformPartitionCmdForMerge().
 		 */
 		if (equal(name, cmd->name))
+		{
 			/* One new partition can have the same name as merged partition. */
-			isSameName = true;
+			char		tmpRelName[NAMEDATALEN];
+
+			/* Generate temporary name. */
+			sprintf(tmpRelName, "merge-%u-%X-tmp", RelationGetRelid(rel), MyProcPid);
+
+			/* Rename partition. */
+			RenameRelationInternal(RelationGetRelid(mergingPartition),
+								   tmpRelName, false, false);
+			/*
+			 * We must bump the command counter to make the new partition tuple
+			 * visible for rename.
+			 */
+			CommandCounterIncrement();
+		}
 
 		/* Store a next merging partition into the list. */
 		mergingPartitionsList = lappend(mergingPartitionsList,
@@ -21553,16 +21564,8 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		DetachPartitionFinalize(rel, mergingPartition, false, defaultPartOid);
 	}
 
-	/* Create table for new partition, use partitioned table as model. */
-	if (isSameName)
-	{
-		/* Create partition table with generated temporary name. */
-		sprintf(tmpRelName, "merge-%u-%X-tmp", RelationGetRelid(rel), MyProcPid);
-		mergePartName = makeRangeVar(cmd->name->schemaname, tmpRelName, -1);
-	}
-
 	newPartRel = createPartitionTable(rel,
-									  mergePartName,
+									  cmd->name,
 									  makeRangeVar(get_namespace_name(RelationGetNamespace(rel)),
 												   RelationGetRelationName(rel), -1),
 									  context);
@@ -21587,26 +21590,6 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		performDeletion(&object, DROP_RESTRICT, 0);
 	}
 	list_free(mergingPartitionsList);
-
-	/* Rename new partition if it is needed. */
-	if (isSameName)
-	{
-		/*
-		 * We must bump the command counter to make the new partition tuple
-		 * visible for rename.
-		 */
-		CommandCounterIncrement();
-
-		/* Rename partition. */
-		RenameRelationInternal(RelationGetRelid(newPartRel),
-							   cmd->name->relname, false, false);
-
-		/*
-		 * Bump the command counter to make the tuple of renamed partition
-		 * visible for attach partition operation.
-		 */
-		CommandCounterIncrement();
-	}
 
 	/*
 	 * Attach a new partition to the partitioned table. wqueue = NULL:

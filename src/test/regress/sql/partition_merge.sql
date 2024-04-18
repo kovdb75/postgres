@@ -470,7 +470,7 @@ DROP TABLE t;
 -- Check the partition index name if the partition name is the same as one
 -- of the merged partitions.
 --
-CREATE TABLE t (i int) PARTITION BY RANGE (i);
+CREATE TABLE t (i int, PRIMARY KEY(i)) PARTITION BY RANGE (i);
 
 CREATE TABLE tp_0_1 PARTITION OF t FOR VALUES FROM (0) TO (1);
 CREATE TABLE tp_1_2 PARTITION OF t FOR VALUES FROM (1) TO (2);
@@ -478,9 +478,13 @@ CREATE TABLE tp_1_2 PARTITION OF t FOR VALUES FROM (1) TO (2);
 CREATE INDEX tidx ON t(i);
 ALTER TABLE t MERGE PARTITIONS (tp_1_2, tp_0_1) INTO tp_1_2;
 
--- Indexname value should be 'tp_1_2_i_idx'.
+-- Indexname values should be 'tp_1_2_pkey' and 'tp_1_2_i_idx'.
 SELECT indexname FROM pg_indexes
 WHERE tablename = 'tp_1_2' AND schemaname = 'partitions_merge_schema';
+
+-- Conname value should be 'tp_1_2_i_not_null'.
+SELECT conname FROM pg_constraint
+WHERE conrelid='tp_1_2'::regclass AND contype='n';
 
 DROP TABLE t;
 
