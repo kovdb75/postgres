@@ -21545,12 +21545,6 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	/* Copy data from merged partitions to new partition. */
 	moveMergedTablesRows(rel, mergingPartitionsList, newPartRel);
 
-	/*
-	 * Attach a new partition to the partitioned table. wqueue = NULL:
-	 * verification for each cloned constraint is not need.
-	 */
-	attachPartitionTable(NULL, rel, newPartRel, cmd->bound);
-
 	/* Unlock and drop merged partitions. */
 	foreach(listptr, mergingPartitionsList)
 	{
@@ -21577,10 +21571,24 @@ ATExecMergePartitions(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		 * visible for rename.
 		 */
 		CommandCounterIncrement();
+
 		/* Rename partition. */
 		RenameRelationInternal(RelationGetRelid(newPartRel),
 							   cmd->name->relname, false, false);
+
+		/*
+		 * Bump the command counter to make the tuple of renamed partition
+		 * visible for attach partition operation.
+		 */
+		CommandCounterIncrement();
 	}
+
+	/*
+	 * Attach a new partition to the partitioned table. wqueue = NULL:
+	 * verification for each cloned constraint is not needed.
+	 */
+	attachPartitionTable(NULL, rel, newPartRel, cmd->bound);
+
 	/* Keep the lock until commit. */
 	table_close(newPartRel, NoLock);
 }
