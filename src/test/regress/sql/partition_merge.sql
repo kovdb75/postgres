@@ -193,14 +193,14 @@ DROP TABLE sales_date;
 --
 -- Test: merge partitions of partitioned table with triggers
 --
-CREATE TABLE salesmans(salesman_id INT PRIMARY KEY, salesman_name VARCHAR(30)) PARTITION BY RANGE (salesman_id);
+CREATE TABLE salesmen(salesman_id INT PRIMARY KEY, salesman_name VARCHAR(30)) PARTITION BY RANGE (salesman_id);
 
-CREATE TABLE salesmans01_10 PARTITION OF salesmans FOR VALUES FROM (1) TO (10);
-CREATE TABLE salesmans10_20 PARTITION OF salesmans FOR VALUES FROM (10) TO (20);
-CREATE TABLE salesmans20_30 PARTITION OF salesmans FOR VALUES FROM (20) TO (30);
-CREATE TABLE salesmans30_40 PARTITION OF salesmans FOR VALUES FROM (30) TO (40);
+CREATE TABLE salesmen01_10 PARTITION OF salesmen FOR VALUES FROM (1) TO (10);
+CREATE TABLE salesmen10_20 PARTITION OF salesmen FOR VALUES FROM (10) TO (20);
+CREATE TABLE salesmen20_30 PARTITION OF salesmen FOR VALUES FROM (20) TO (30);
+CREATE TABLE salesmen30_40 PARTITION OF salesmen FOR VALUES FROM (30) TO (40);
 
-INSERT INTO salesmans VALUES (1,  'Poirot');
+INSERT INTO salesmen VALUES (1,  'Poirot');
 
 CREATE OR REPLACE FUNCTION after_insert_row_trigger() RETURNS trigger LANGUAGE 'plpgsql' AS $BODY$
 BEGIN
@@ -209,70 +209,70 @@ BEGIN
 END;
 $BODY$;
 
-CREATE TRIGGER salesmans_after_insert_statement_trigger
+CREATE TRIGGER salesmen_after_insert_statement_trigger
     AFTER INSERT
-    ON salesmans
+    ON salesmen
     FOR EACH STATEMENT
-    EXECUTE PROCEDURE after_insert_row_trigger('salesmans');
+    EXECUTE PROCEDURE after_insert_row_trigger('salesmen');
 
-CREATE TRIGGER salesmans_after_insert_row_trigger
+CREATE TRIGGER salesmen_after_insert_row_trigger
     AFTER INSERT
-    ON salesmans
+    ON salesmen
     FOR EACH ROW
-    EXECUTE PROCEDURE after_insert_row_trigger('salesmans');
+    EXECUTE PROCEDURE after_insert_row_trigger('salesmen');
 
 -- 2 triggers should fire here (row + statement):
-INSERT INTO salesmans VALUES (10, 'May');
+INSERT INTO salesmen VALUES (10, 'May');
 -- 1 trigger should fire here (row):
-INSERT INTO salesmans10_20 VALUES (19, 'Ivanov');
+INSERT INTO salesmen10_20 VALUES (19, 'Ivanov');
 
-ALTER TABLE salesmans MERGE PARTITIONS (salesmans10_20, salesmans20_30, salesmans30_40) INTO salesmans10_40;
+ALTER TABLE salesmen MERGE PARTITIONS (salesmen10_20, salesmen20_30, salesmen30_40) INTO salesmen10_40;
 
 -- 2 triggers should fire here (row + statement):
-INSERT INTO salesmans VALUES (20, 'Smirnoff');
+INSERT INTO salesmen VALUES (20, 'Smirnoff');
 -- 1 trigger should fire here (row):
-INSERT INTO salesmans10_40 VALUES (30, 'Ford');
+INSERT INTO salesmen10_40 VALUES (30, 'Ford');
 
-SELECT * FROM salesmans01_10;
-SELECT * FROM salesmans10_40;
+SELECT * FROM salesmen01_10;
+SELECT * FROM salesmen10_40;
 
-DROP TABLE salesmans;
+DROP TABLE salesmen;
 DROP FUNCTION after_insert_row_trigger();
 
 --
 -- Test: merge partitions with deleted columns
 --
-CREATE TABLE salesmans(salesman_id INT PRIMARY KEY, salesman_name VARCHAR(30)) PARTITION BY RANGE (salesman_id);
+CREATE TABLE salesmen(salesman_id INT PRIMARY KEY, salesman_name VARCHAR(30)) PARTITION BY RANGE (salesman_id);
 
-CREATE TABLE salesmans01_10 PARTITION OF salesmans FOR VALUES FROM (1) TO (10);
+CREATE TABLE salesmen01_10 PARTITION OF salesmen FOR VALUES FROM (1) TO (10);
 -- Create partitions with some deleted columns:
-CREATE TABLE salesmans10_20(d1 VARCHAR(30), salesman_id INT PRIMARY KEY, salesman_name VARCHAR(30));
-CREATE TABLE salesmans20_30(salesman_id INT PRIMARY KEY, d2 INT,  salesman_name VARCHAR(30));
-CREATE TABLE salesmans30_40(salesman_id INT PRIMARY KEY, d3 DATE, salesman_name VARCHAR(30));
+CREATE TABLE salesmen10_20(d1 VARCHAR(30), salesman_id INT PRIMARY KEY, salesman_name VARCHAR(30));
+CREATE TABLE salesmen20_30(salesman_id INT PRIMARY KEY, d2 INT,  salesman_name VARCHAR(30));
+CREATE TABLE salesmen30_40(salesman_id INT PRIMARY KEY, d3 DATE, salesman_name VARCHAR(30));
 
-INSERT INTO salesmans10_20 VALUES ('dummy value 1', 19, 'Ivanov');
-INSERT INTO salesmans20_30 VALUES (20, 101, 'Smirnoff');
-INSERT INTO salesmans30_40 VALUES (31, now(), 'Popov');
+INSERT INTO salesmen10_20 VALUES ('dummy value 1', 19, 'Ivanov');
+INSERT INTO salesmen20_30 VALUES (20, 101, 'Smirnoff');
+INSERT INTO salesmen30_40 VALUES (31, now(), 'Popov');
 
-ALTER TABLE salesmans10_20 DROP COLUMN d1;
-ALTER TABLE salesmans20_30 DROP COLUMN d2;
-ALTER TABLE salesmans30_40 DROP COLUMN d3;
+ALTER TABLE salesmen10_20 DROP COLUMN d1;
+ALTER TABLE salesmen20_30 DROP COLUMN d2;
+ALTER TABLE salesmen30_40 DROP COLUMN d3;
 
-ALTER TABLE salesmans ATTACH PARTITION salesmans10_20 FOR VALUES FROM (10) TO (20);
-ALTER TABLE salesmans ATTACH PARTITION salesmans20_30 FOR VALUES FROM (20) TO (30);
-ALTER TABLE salesmans ATTACH PARTITION salesmans30_40 FOR VALUES FROM (30) TO (40);
+ALTER TABLE salesmen ATTACH PARTITION salesmen10_20 FOR VALUES FROM (10) TO (20);
+ALTER TABLE salesmen ATTACH PARTITION salesmen20_30 FOR VALUES FROM (20) TO (30);
+ALTER TABLE salesmen ATTACH PARTITION salesmen30_40 FOR VALUES FROM (30) TO (40);
 
-INSERT INTO salesmans VALUES (1, 'Poirot');
-INSERT INTO salesmans VALUES (10, 'May');
-INSERT INTO salesmans VALUES (30, 'Ford');
+INSERT INTO salesmen VALUES (1, 'Poirot');
+INSERT INTO salesmen VALUES (10, 'May');
+INSERT INTO salesmen VALUES (30, 'Ford');
 
-ALTER TABLE salesmans MERGE PARTITIONS (salesmans10_20, salesmans20_30, salesmans30_40) INTO salesmans10_40;
+ALTER TABLE salesmen MERGE PARTITIONS (salesmen10_20, salesmen20_30, salesmen30_40) INTO salesmen10_40;
 
-select * from salesmans;
-select * from salesmans01_10;
-select * from salesmans10_40;
+select * from salesmen;
+select * from salesmen01_10;
+select * from salesmen10_40;
 
-DROP TABLE salesmans;
+DROP TABLE salesmen;
 
 --
 -- Test: merge sub-partitions

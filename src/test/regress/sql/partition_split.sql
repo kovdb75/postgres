@@ -337,11 +337,11 @@ DROP TABLE sales_range;
 --
 -- Test: split partition with CHECK and FOREIGN KEY CONSTRAINTs on partitioned table
 --
-CREATE TABLE salesmans(salesman_id INT PRIMARY KEY, salesman_name VARCHAR(30));
-INSERT INTO salesmans VALUES (1,  'Poirot');
+CREATE TABLE salesmen(salesman_id INT PRIMARY KEY, salesman_name VARCHAR(30));
+INSERT INTO salesmen VALUES (1,  'Poirot');
 
 CREATE TABLE sales_range (
-salesman_id INT REFERENCES salesmans(salesman_id),
+salesman_id INT REFERENCES salesmen(salesman_id),
 sales_amount INT CHECK (sales_amount > 1),
 sales_date DATE) PARTITION BY RANGE (sales_date);
 
@@ -369,22 +369,22 @@ INSERT INTO sales_range VALUES (-1, 10, '2022-03-11');
 INSERT INTO sales_range VALUES (1, 10, '2022-03-11');
 
 DROP TABLE sales_range CASCADE;
-DROP TABLE salesmans CASCADE;
+DROP TABLE salesmen CASCADE;
 
 --
 -- Test: split partition on partitioned table in case of existing FOREIGN KEY reference from another table
 --
-CREATE TABLE salesmans(salesman_id INT PRIMARY KEY, salesman_name VARCHAR(30)) PARTITION BY RANGE (salesman_id);
-CREATE TABLE sales (salesman_id INT REFERENCES salesmans(salesman_id), sales_amount INT, sales_date DATE);
+CREATE TABLE salesmen(salesman_id INT PRIMARY KEY, salesman_name VARCHAR(30)) PARTITION BY RANGE (salesman_id);
+CREATE TABLE sales (salesman_id INT REFERENCES salesmen(salesman_id), sales_amount INT, sales_date DATE);
 
-CREATE TABLE salesmans01_10 PARTITION OF salesmans FOR VALUES FROM (1) TO (10);
-CREATE TABLE salesmans10_40 PARTITION OF salesmans FOR VALUES FROM (10) TO (40);
+CREATE TABLE salesmen01_10 PARTITION OF salesmen FOR VALUES FROM (1) TO (10);
+CREATE TABLE salesmen10_40 PARTITION OF salesmen FOR VALUES FROM (10) TO (40);
 
-INSERT INTO salesmans VALUES (1,  'Poirot');
-INSERT INTO salesmans VALUES (10, 'May');
-INSERT INTO salesmans VALUES (19, 'Ivanov');
-INSERT INTO salesmans VALUES (20, 'Smirnoff');
-INSERT INTO salesmans VALUES (30, 'Ford');
+INSERT INTO salesmen VALUES (1,  'Poirot');
+INSERT INTO salesmen VALUES (10, 'May');
+INSERT INTO salesmen VALUES (19, 'Ivanov');
+INSERT INTO salesmen VALUES (20, 'Smirnoff');
+INSERT INTO salesmen VALUES (30, 'Ford');
 
 INSERT INTO sales VALUES (1,  100, '2022-03-01');
 INSERT INTO sales VALUES (1,  110, '2022-03-02');
@@ -395,18 +395,18 @@ INSERT INTO sales VALUES (20, 50,  '2022-03-12');
 INSERT INTO sales VALUES (20, 170, '2022-03-02');
 INSERT INTO sales VALUES (30, 30,  '2022-03-04');
 
-SELECT * FROM salesmans01_10;
-SELECT * FROM salesmans10_40;
+SELECT * FROM salesmen01_10;
+SELECT * FROM salesmen10_40;
 
-ALTER TABLE salesmans SPLIT PARTITION salesmans10_40 INTO
-  (PARTITION salesmans10_20 FOR VALUES FROM (10) TO (20),
-   PARTITION salesmans20_30 FOR VALUES FROM (20) TO (30),
-   PARTITION salesmans30_40 FOR VALUES FROM (30) TO (40));
+ALTER TABLE salesmen SPLIT PARTITION salesmen10_40 INTO
+  (PARTITION salesmen10_20 FOR VALUES FROM (10) TO (20),
+   PARTITION salesmen20_30 FOR VALUES FROM (20) TO (30),
+   PARTITION salesmen30_40 FOR VALUES FROM (30) TO (40));
 
-SELECT * FROM salesmans01_10;
-SELECT * FROM salesmans10_20;
-SELECT * FROM salesmans20_30;
-SELECT * FROM salesmans30_40;
+SELECT * FROM salesmen01_10;
+SELECT * FROM salesmen10_20;
+SELECT * FROM salesmen20_30;
+SELECT * FROM salesmen30_40;
 
 -- ERROR:  insert or update on table "sales" violates foreign key constraint "sales_salesman_id_fkey"
 INSERT INTO sales VALUES (40, 50,  '2022-03-04');
@@ -414,17 +414,17 @@ INSERT INTO sales VALUES (40, 50,  '2022-03-04');
 INSERT INTO sales VALUES (30, 50,  '2022-03-04');
 
 DROP TABLE sales CASCADE;
-DROP TABLE salesmans CASCADE;
+DROP TABLE salesmen CASCADE;
 
 --
 -- Test: split partition of partitioned table with triggers
 --
-CREATE TABLE salesmans(salesman_id INT PRIMARY KEY, salesman_name VARCHAR(30)) PARTITION BY RANGE (salesman_id);
+CREATE TABLE salesmen(salesman_id INT PRIMARY KEY, salesman_name VARCHAR(30)) PARTITION BY RANGE (salesman_id);
 
-CREATE TABLE salesmans01_10 PARTITION OF salesmans FOR VALUES FROM (1) TO (10);
-CREATE TABLE salesmans10_40 PARTITION OF salesmans FOR VALUES FROM (10) TO (40);
+CREATE TABLE salesmen01_10 PARTITION OF salesmen FOR VALUES FROM (1) TO (10);
+CREATE TABLE salesmen10_40 PARTITION OF salesmen FOR VALUES FROM (10) TO (40);
 
-INSERT INTO salesmans VALUES (1,  'Poirot');
+INSERT INTO salesmen VALUES (1,  'Poirot');
 
 CREATE OR REPLACE FUNCTION after_insert_row_trigger() RETURNS trigger LANGUAGE 'plpgsql' AS $BODY$
 BEGIN
@@ -433,115 +433,115 @@ BEGIN
 END;
 $BODY$;
 
-CREATE TRIGGER salesmans_after_insert_statement_trigger
+CREATE TRIGGER salesmen_after_insert_statement_trigger
     AFTER INSERT
-    ON salesmans
+    ON salesmen
     FOR EACH STATEMENT
-    EXECUTE PROCEDURE after_insert_row_trigger('salesmans');
+    EXECUTE PROCEDURE after_insert_row_trigger('salesmen');
 
-CREATE TRIGGER salesmans_after_insert_row_trigger
+CREATE TRIGGER salesmen_after_insert_row_trigger
     AFTER INSERT
-    ON salesmans
+    ON salesmen
     FOR EACH ROW
-    EXECUTE PROCEDURE after_insert_row_trigger('salesmans');
+    EXECUTE PROCEDURE after_insert_row_trigger('salesmen');
 
 -- 2 triggers should fire here (row + statement):
-INSERT INTO salesmans VALUES (10, 'May');
+INSERT INTO salesmen VALUES (10, 'May');
 -- 1 trigger should fire here (row):
-INSERT INTO salesmans10_40 VALUES (19, 'Ivanov');
+INSERT INTO salesmen10_40 VALUES (19, 'Ivanov');
 
-ALTER TABLE salesmans SPLIT PARTITION salesmans10_40 INTO
-  (PARTITION salesmans10_20 FOR VALUES FROM (10) TO (20),
-   PARTITION salesmans20_30 FOR VALUES FROM (20) TO (30),
-   PARTITION salesmans30_40 FOR VALUES FROM (30) TO (40));
+ALTER TABLE salesmen SPLIT PARTITION salesmen10_40 INTO
+  (PARTITION salesmen10_20 FOR VALUES FROM (10) TO (20),
+   PARTITION salesmen20_30 FOR VALUES FROM (20) TO (30),
+   PARTITION salesmen30_40 FOR VALUES FROM (30) TO (40));
 
 -- 2 triggers should fire here (row + statement):
-INSERT INTO salesmans VALUES (20, 'Smirnoff');
+INSERT INTO salesmen VALUES (20, 'Smirnoff');
 -- 1 trigger should fire here (row):
-INSERT INTO salesmans30_40 VALUES (30, 'Ford');
+INSERT INTO salesmen30_40 VALUES (30, 'Ford');
 
-SELECT * FROM salesmans01_10;
-SELECT * FROM salesmans10_20;
-SELECT * FROM salesmans20_30;
-SELECT * FROM salesmans30_40;
+SELECT * FROM salesmen01_10;
+SELECT * FROM salesmen10_20;
+SELECT * FROM salesmen20_30;
+SELECT * FROM salesmen30_40;
 
-DROP TABLE salesmans CASCADE;
+DROP TABLE salesmen CASCADE;
 DROP FUNCTION after_insert_row_trigger();
 
 --
 -- Test: split partition witch identity column
 -- If split partition column is identity column, columns of new partitions are identity columns too.
 --
-CREATE TABLE salesmans(salesman_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, salesman_name VARCHAR(30)) PARTITION BY RANGE (salesman_id);
+CREATE TABLE salesmen(salesman_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, salesman_name VARCHAR(30)) PARTITION BY RANGE (salesman_id);
 
-CREATE TABLE salesmans1_2 PARTITION OF salesmans FOR VALUES FROM (1) TO (2);
+CREATE TABLE salesmen1_2 PARTITION OF salesmen FOR VALUES FROM (1) TO (2);
 -- Create new partition with identity column:
-CREATE TABLE salesmans2_5(salesman_id INT NOT NULL, salesman_name VARCHAR(30));
-ALTER TABLE salesmans ATTACH PARTITION salesmans2_5 FOR VALUES FROM (2) TO (5);
+CREATE TABLE salesmen2_5(salesman_id INT NOT NULL, salesman_name VARCHAR(30));
+ALTER TABLE salesmen ATTACH PARTITION salesmen2_5 FOR VALUES FROM (2) TO (5);
 
-INSERT INTO salesmans (salesman_name) VALUES ('Poirot');
-INSERT INTO salesmans (salesman_name) VALUES ('Ivanov');
+INSERT INTO salesmen (salesman_name) VALUES ('Poirot');
+INSERT INTO salesmen (salesman_name) VALUES ('Ivanov');
 
-SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmans'::regclass::oid;
-SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmans1_2'::regclass::oid;
+SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmen'::regclass::oid;
+SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmen1_2'::regclass::oid;
 -- Split partition has identity column:
-SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmans2_5'::regclass::oid;
+SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmen2_5'::regclass::oid;
 
-ALTER TABLE salesmans SPLIT PARTITION salesmans2_5 INTO
-  (PARTITION salesmans2_3 FOR VALUES FROM (2) TO (3),
-   PARTITION salesmans3_4 FOR VALUES FROM (3) TO (4),
-   PARTITION salesmans4_5 FOR VALUES FROM (4) TO (5));
+ALTER TABLE salesmen SPLIT PARTITION salesmen2_5 INTO
+  (PARTITION salesmen2_3 FOR VALUES FROM (2) TO (3),
+   PARTITION salesmen3_4 FOR VALUES FROM (3) TO (4),
+   PARTITION salesmen4_5 FOR VALUES FROM (4) TO (5));
 
-INSERT INTO salesmans (salesman_name) VALUES ('May');
-INSERT INTO salesmans (salesman_name) VALUES ('Ford');
+INSERT INTO salesmen (salesman_name) VALUES ('May');
+INSERT INTO salesmen (salesman_name) VALUES ('Ford');
 
-SELECT * FROM salesmans1_2;
-SELECT * FROM salesmans2_3;
-SELECT * FROM salesmans3_4;
-SELECT * FROM salesmans4_5;
+SELECT * FROM salesmen1_2;
+SELECT * FROM salesmen2_3;
+SELECT * FROM salesmen3_4;
+SELECT * FROM salesmen4_5;
 
-SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmans'::regclass::oid;
-SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmans1_2'::regclass::oid;
+SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmen'::regclass::oid;
+SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmen1_2'::regclass::oid;
 -- New partitions have identity-columns:
-SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmans2_3'::regclass::oid;
-SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmans3_4'::regclass::oid;
-SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmans4_5'::regclass::oid;
+SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmen2_3'::regclass::oid;
+SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmen3_4'::regclass::oid;
+SELECT attname, attidentity, attgenerated FROM pg_attribute WHERE attnum > 0 AND attrelid = 'salesmen4_5'::regclass::oid;
 
-DROP TABLE salesmans CASCADE;
+DROP TABLE salesmen CASCADE;
 
 --
 -- Test: split partition with deleted columns
 --
-CREATE TABLE salesmans(salesman_id INT PRIMARY KEY, salesman_name VARCHAR(30)) PARTITION BY RANGE (salesman_id);
+CREATE TABLE salesmen(salesman_id INT PRIMARY KEY, salesman_name VARCHAR(30)) PARTITION BY RANGE (salesman_id);
 
-CREATE TABLE salesmans01_10 PARTITION OF salesmans FOR VALUES FROM (1) TO (10);
+CREATE TABLE salesmen01_10 PARTITION OF salesmen FOR VALUES FROM (1) TO (10);
 -- Create new partition with some deleted columns:
-CREATE TABLE salesmans10_40(d1 VARCHAR(30), salesman_id INT PRIMARY KEY, d2 INT, d3 DATE, salesman_name VARCHAR(30));
+CREATE TABLE salesmen10_40(d1 VARCHAR(30), salesman_id INT PRIMARY KEY, d2 INT, d3 DATE, salesman_name VARCHAR(30));
 
-INSERT INTO salesmans10_40 VALUES ('dummy value 1', 19, 100, now(), 'Ivanov');
-INSERT INTO salesmans10_40 VALUES ('dummy value 2', 20, 101, now(), 'Smirnoff');
+INSERT INTO salesmen10_40 VALUES ('dummy value 1', 19, 100, now(), 'Ivanov');
+INSERT INTO salesmen10_40 VALUES ('dummy value 2', 20, 101, now(), 'Smirnoff');
 
-ALTER TABLE salesmans10_40 DROP COLUMN d1;
-ALTER TABLE salesmans10_40 DROP COLUMN d2;
-ALTER TABLE salesmans10_40 DROP COLUMN d3;
+ALTER TABLE salesmen10_40 DROP COLUMN d1;
+ALTER TABLE salesmen10_40 DROP COLUMN d2;
+ALTER TABLE salesmen10_40 DROP COLUMN d3;
 
-ALTER TABLE salesmans ATTACH PARTITION salesmans10_40 FOR VALUES FROM (10) TO (40);
+ALTER TABLE salesmen ATTACH PARTITION salesmen10_40 FOR VALUES FROM (10) TO (40);
 
-INSERT INTO salesmans VALUES (1, 'Poirot');
-INSERT INTO salesmans VALUES (10, 'May');
-INSERT INTO salesmans VALUES (30, 'Ford');
+INSERT INTO salesmen VALUES (1, 'Poirot');
+INSERT INTO salesmen VALUES (10, 'May');
+INSERT INTO salesmen VALUES (30, 'Ford');
 
-ALTER TABLE salesmans SPLIT PARTITION salesmans10_40 INTO
-  (PARTITION salesmans10_20 FOR VALUES FROM (10) TO (20),
-   PARTITION salesmans20_30 FOR VALUES FROM (20) TO (30),
-   PARTITION salesmans30_40 FOR VALUES FROM (30) TO (40));
+ALTER TABLE salesmen SPLIT PARTITION salesmen10_40 INTO
+  (PARTITION salesmen10_20 FOR VALUES FROM (10) TO (20),
+   PARTITION salesmen20_30 FOR VALUES FROM (20) TO (30),
+   PARTITION salesmen30_40 FOR VALUES FROM (30) TO (40));
 
-select * from salesmans01_10;
-select * from salesmans10_20;
-select * from salesmans20_30;
-select * from salesmans30_40;
+select * from salesmen01_10;
+select * from salesmen10_20;
+select * from salesmen20_30;
+select * from salesmen30_40;
 
-DROP TABLE salesmans CASCADE;
+DROP TABLE salesmen CASCADE;
 
 --
 -- Test: split sub-partition
